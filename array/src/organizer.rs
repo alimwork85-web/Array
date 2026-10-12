@@ -54,42 +54,61 @@ impl OrganizerEngine {
         sanitize_filename(&cleaned)
     }
 
+    /// مفتاح المقارنة: توحيد الحروف العربية وحالة الأحرف اللاتينية
+    fn group_key(name: &str) -> String {
+        normalize_arabic(name).to_lowercase()
+    }
+
+    /// كشف السلاسل والحلقات (مثل: الحلقة 19، حلقة 20...)
+    fn is_episode(text: &str) -> bool {
+        let re_ep = Regex::new(r"(?i)\b(الحلقة|حلقة|part|ep|episode)\s*\d+").unwrap();
+        re_ep.is_match(text) || text.starts_with("الحلقة") || text.starts_with("حلقة")
+    }
+
     /// استخراج المجموعات والسلاسل الذكي
     fn extract_group_key(artist_raw: &str, title_raw: &str) -> (String, String) {
-        let clean_art = Self::clean_string(artist_raw);
         let clean_tit = Self::clean_string(title_raw);
-        let norm_art = normalize_arabic(&clean_art);
+        let series = ("سلسلة الحلقات".to_string(), Self::group_key("سلسلة الحلقات"));
+
+        // اسم ملف مثل "الحلقة 19 - الشيخ فلان" يُقسم إلى فنان="الحلقة 19" وعنوان="الشيخ فلان"
+        if Self::is_episode(artist_raw) {
+            let norm_tit = Self::group_key(&clean_tit);
+            if norm_tit.chars().count() > 3 {
+                return (clean_tit, norm_tit);
+            }
+            return series;
+        }
+
+        let clean_art = if artist_raw.trim().is_empty() { String::new() } else { Self::clean_string(artist_raw) };
+        let norm_art = Self::group_key(&clean_art);
 
         // إذا كان اسم الفنان موجوداً وصحيحاً (ليس كوداً أو مجهولاً)
-        let is_valid_artist = !norm_art.is_empty()
-            && norm_art != "single tracks"
+        let is_valid_artist = norm_art != "single tracks"
             && norm_art != "unknown"
             && norm_art != "track"
-            && norm_art.len() > 2;
+            && norm_art.chars().count() > 2;
 
         if is_valid_artist {
             return (clean_art, norm_art);
         }
 
-        // كشف السلاسل والحلقات (مثل: الحلقة 19، حلقة 20...)
-        let re_ep = Regex::new(r"(?i)(الحلقة|حلقة|part|ep|episode)\s*\d+").unwrap();
-        if re_ep.is_match(&clean_tit) || clean_tit.starts_with("الحلقة") || clean_tit.starts_with("حلقة") {
+        if Self::is_episode(&clean_tit) {
             // البحث عن اسم الشيخ أو السلسلة في نهاية العنوان بعد الشرطة (-)
             if let Some(pos) = clean_tit.rfind('-') {
                 let suffix = clean_tit[pos + 1..].trim();
-                let norm_suf = normalize_arabic(suffix);
-                if norm_suf.len() > 3 {
+                let norm_suf = Self::group_key(suffix);
+                if norm_suf.chars().count() > 3 {
                     return (suffix.to_string(), norm_suf);
                 }
             }
-            return ("سلسلة الحلقات".to_string(), "سلسلة الحلقات".to_string());
+            return series;
         }
 
-        // البحث عن أصحاب المقاطع في نهاية اسم الملف
+        // البحث عن أصحاب المقاطع في نهاية اسم الملف (المقارنة بعد التطبيع: أ ← ا)
         if let Some(pos) = clean_tit.rfind('-') {
             let suffix = clean_tit[pos + 1..].trim();
-            let norm_suf = normalize_arabic(suffix);
-            if norm_suf.len() > 3 && (norm_suf.contains("الشيخ") || norm_suf.contains("دكتور") || norm_suf.contains("فنان") || norm_suf.contains("أدهم")) {
+            let norm_suf = Self::group_key(suffix);
+            if norm_suf.chars().count() > 3 && (norm_suf.contains("الشيخ") || norm_suf.contains("دكتور") || norm_suf.contains("فنان") || norm_suf.contains("ادهم")) {
                 return (suffix.to_string(), norm_suf);
             }
         }
@@ -234,10 +253,10 @@ impl OrganizerEngine {
             }
         }
 
-        let clean_art = Self::clean_string(&artist);
+        // الفنان يبقى خاماً (وفارغاً إن لم يوجد)؛ يُنظَّف في extract_group_key
         let clean_tit = Self::clean_string(&title);
 
-        (clean_art, if clean_tit.is_empty() { "Audio Track".to_string() } else { clean_tit })
+        (artist, if clean_tit.is_empty() { "Audio Track".to_string() } else { clean_tit })
     }
 
     fn organize_files(files: Vec<RawFileInfo>, output_base: &Path) -> Result<(), String> {
@@ -306,5 +325,58 @@ impl OrganizerEngine {
         }
 
         Ok(())
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn group_of(file_name: &str) -> String {
+        let (artist, title) = OrganizerEngine::extract_audio_info(Path::new(file_name));
+        OrganizerEngine::extract_group_key(&artist, &title).0
+    }
+
+    #[test]
+    fn artist_from_file_name() {
+        assert_eq!(group_of("عمرو دياب - تملي معاك.mp3"), "عمرو دياب");
+    }
+
+    #[test]
+    fn no_artist_goes_to_single_tracks() {
+        assert_eq!(group_of("track01.mp3"), "Single Tracks");
+    }
+
+    #[test]
+    fn episode_with_speaker_in_file_name() {
+        assert_eq!(group_of("الحلقة 19 - الشيخ محمد.mp3"), "الشيخ محمد");
+        assert_eq!(group_of("الحلقة 20 - الشيخ محمد.mp3"), "الشيخ محمد");
+    }
+
+    #[test]
+    fn episode_without_speaker_is_a_series() {
+        assert_eq!(group_of("الحلقة 19.mp3"), "سلسلة الحلقات");
+    }
+
+    #[test]
+    fn known_speaker_suffix_matches_after_normalization() {
+        let (name, _) = OrganizerEngine::extract_group_key("", "محاضرة - أدهم الشرقاوي");
+        assert_eq!(name, "أدهم الشرقاوي");
+    }
+
+    #[test]
+    fn artist_key_ignores_case_and_hamza() {
+        let (_, a) = OrganizerEngine::extract_group_key("Amr Diab", "x");
+        let (_, b) = OrganizerEngine::extract_group_key("amr diab", "x");
+        assert_eq!(a, b);
+        let (_, c) = OrganizerEngine::extract_group_key("أحمد", "x");
+        let (_, d) = OrganizerEngine::extract_group_key("احمد", "x");
+        assert_eq!(c, d);
+    }
+
+    #[test]
+    fn short_arabic_artist_counted_in_letters() {
+        // "علي" ثلاثة أحرف (6 بايت) فهو اسم صالح، و"عل" حرفان فقط
+        assert_eq!(OrganizerEngine::extract_group_key("علي", "x").0, "علي");
+        assert_eq!(OrganizerEngine::extract_group_key("عل", "x").0, "Single Tracks");
     }
 }
