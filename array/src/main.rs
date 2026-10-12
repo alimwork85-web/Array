@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod grouping;
 mod normalizer;
 mod organizer;
 mod rtl;

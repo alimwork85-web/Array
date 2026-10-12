@@ -10,13 +10,20 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
-use crate::normalizer::{normalize_arabic, sanitize_filename};
+use crate::grouping::{self, Assignment, Track, DEFAULT_AI_MARKERS};
+use crate::normalizer::{fix_mojibake, looks_garbled, normalize_arabic, sanitize_filename, to_western_digits};
 use crate::safety::SafetyChecker;
 
 // تُجمَّع التعبيرات مرة واحدة بدلاً من كل ملف
-static RE_BRACKETS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[.*?\]|\(.*?\)|_|\bAUD-\w+\b").unwrap());
-static RE_PIPES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\|+").unwrap());
+// ضوضاء الأسماء فقط: أكواد بين [ ] ومنها [AUD-...] المبتورة، عدادات التكرار (1)، وكلمات مثل (Official Video).
+// الأقواس ذات المعنى (اسم الآية أو السورة) تبقى.
+static RE_NOISE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\[[^\]]*\]|\[(?:AUD|VID)\b[^\]]*$|\(\s*\d+\s*\)|\((?:official[^)]*|lyrics?|audio|video|hd|4k|كلمات|فيديو كليب|حصري[اًا]?)\)|\bAUD-\w+\b|[_#]").unwrap()
+});
+static RE_PIPES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[|｜]+").unwrap());
 static RE_SPACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
+static RE_INNER_EXT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\.(mp3|m4a|aac|wav|ogg|flac|wma|opus|mp4|mkv|avi|mov|jpe?g|png|pdf|docx?)\s*$").unwrap());
 static RE_EPISODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(الحلقة|حلقة|part|ep|episode)\s*\d+").unwrap());
 
 /// كلمات تدل على صاحب المقطع في نهاية اسم الملف (مثل: "محاضرة - الشيخ فلان")
@@ -29,6 +36,8 @@ pub struct Options {
     /// تنظيف أسماء الملفات (حذف الأقواس والرموز)؛ عند false تبقى الأسماء الأصلية
     pub rename_files: bool,
     pub speaker_keywords: Vec<String>,
+    /// كلمات تدل على مقاطع الذكاء الاصطناعي (اسم الأداة مثل gemini أو suno)
+    pub ai_markers: Vec<String>,
 }
 
 impl Default for Options {
@@ -36,6 +45,7 @@ impl Default for Options {
         Self {
             rename_files: true,
             speaker_keywords: DEFAULT_SPEAKER_KEYWORDS.iter().map(|k| k.to_string()).collect(),
+            ai_markers: DEFAULT_AI_MARKERS.iter().map(|k| k.to_string()).collect(),
         }
     }
 }
@@ -80,11 +90,10 @@ pub enum FileType {
 struct RawFileInfo {
     path: PathBuf,
     category: String,
-    raw_artist_or_group: String,
+    /// رقم الملف في قائمة الأدلة الصوتية (للموسيقى فقط)
+    track_index: Option<usize>,
     /// اسم الملف الجديد بدون الامتداد (منظَّف أو الأصلي حسب الإعدادات)
     new_stem: String,
-    /// العنوان المنظَّف، ويُستخدم لكشف السلاسل وأصحاب المقاطع
-    clean_title: String,
     extension: String,
 }
 
@@ -106,10 +115,14 @@ impl OrganizerEngine {
     }
 
     fn clean_string(input: &str) -> String {
-        // حذف الأقواس، الأكواد العشوائية [AUD-...], والأرقام التعريفية بين الأقواس
-        let mut cleaned = RE_BRACKETS.replace_all(input, " ").to_string();
+        let input = to_western_digits(&fix_mojibake(input));
+        let mut cleaned = RE_NOISE.replace_all(&input, " ").to_string();
         cleaned = RE_PIPES.replace_all(&cleaned, " ").to_string();
         cleaned = RE_SPACES.replace_all(&cleaned, " ").to_string();
+        // امتداد مكرر داخل الاسم: "أغنية.mp3 (1).mp3" → "أغنية"
+        cleaned = RE_INNER_EXT.replace(cleaned.trim(), "").to_string();
+        // شرطات ونقاط زائدة في البداية أو النهاية: "- وصية" → "وصية"
+        cleaned = cleaned.trim_matches(|c: char| c == '-' || c == '.' || c.is_whitespace()).to_string();
 
         sanitize_filename(&cleaned)
     }
@@ -238,9 +251,16 @@ impl OrganizerEngine {
             .unwrap_or_default();
         existing.sort();
 
+        // المجلد المختار نفسه قد يكون مجلد فئة (مثل D:\Music): يُستخدم مباشرة بدل إنشاء Music داخله
+        let root_key = Self::group_key(source_path.file_name().unwrap_or_default().to_string_lossy().trim());
+
         let mut dirs = HashMap::new();
         for category in ["Music", "Pictures", "Videos", "Documents", "Archives"] {
             let synonyms: Vec<String> = Self::category_synonyms(category).iter().map(|s| Self::group_key(s)).collect();
+            if synonyms.contains(&root_key) {
+                dirs.insert(category, source_path.to_path_buf());
+                continue;
+            }
             // الاسم الإنجليزي أولاً ثم بقية المرادفات بترتيبها
             let found = synonyms.iter().find_map(|syn| existing.iter().find(|(key, _)| key == syn).map(|(_, p)| p.clone()));
             let dir = found.unwrap_or_else(|| {
@@ -302,27 +322,19 @@ impl OrganizerEngine {
         let (files, skipped) = Self::collect_files(source_path);
         let category_dirs = Self::category_dirs(source_path);
         let music_dir = &category_dirs["Music"];
+        let mut tracks: Vec<Track> = Vec::new();
 
         for path in files {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_string();
             let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
 
-            let (category, artist, clean_title, clean_name) = match Self::get_file_type(&ext) {
+            let (category, clean_name, track) = match Self::get_file_type(&ext) {
                 FileType::Audio => {
-                    let (mut artist, title) = Self::extract_audio_info(&path);
-                    // ملف موجود أصلاً في مجلد فنان داخل مجلد الموسيقى: اسم المجلد هو الفنان،
-                    // حتى يبقى في مكانه عند إعادة التنظيم
-                    if artist.trim().is_empty() {
-                        if let Some(parent) = path.parent().filter(|p| p.parent() == Some(music_dir.as_path())) {
-                            let folder = parent.file_name().unwrap_or_default().to_string_lossy().to_string();
-                            if folder != "Single Tracks" {
-                                artist = folder;
-                            }
-                        }
-                    }
-                    // اسم مثل "الحلقة 19 - الشيخ فلان" يبقى كاملاً حتى لا يضيع رقم الحلقة
-                    let clean_name = if Self::is_episode(&artist) { Self::clean_string(&stem) } else { title.clone() };
-                    ("Music", artist, title, clean_name)
+                    let (artist, title, tag_title) = Self::extract_audio_info(&path);
+                    let (speaker, speaker_key) = Self::extract_group_key(&artist, &title, &keywords);
+                    let speaker = (speaker_key != "single tracks").then_some(speaker);
+                    let track = grouping::read_track(&path, source_path, music_dir, &artist, &title, speaker.as_deref(), &options.ai_markers);
+                    ("Music", Self::best_name(&stem, tag_title), Some(track))
                 }
                 other => {
                     let category = match other {
@@ -331,8 +343,7 @@ impl OrganizerEngine {
                         FileType::Document => "Documents",
                         _ => "Archives",
                     };
-                    let clean = Self::clean_string(&stem);
-                    (category, "General".to_string(), clean.clone(), clean)
+                    (category, Self::clean_string(&stem), None)
                 }
             };
             // بدون إعادة تسمية يبقى الاسم والامتداد كما هما تماماً
@@ -342,17 +353,47 @@ impl OrganizerEngine {
                 (stem, ext)
             };
 
+            let track_index = track.map(|t| {
+                tracks.push(t);
+                tracks.len() - 1
+            });
             raw_files.push(RawFileInfo {
                 path,
                 category: category.to_string(),
-                raw_artist_or_group: artist,
+                track_index,
                 new_stem,
-                clean_title,
                 extension,
             });
         }
 
-        let (moves, in_place) = Self::plan_moves(raw_files, &category_dirs, &keywords);
+        // تجميع الموسيقى بمقارنة الأدلة بين كل الملفات
+        let existing_music_dirs: Vec<String> = fs::read_dir(music_dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let assignments = grouping::assign(&tracks, &existing_music_dirs);
+        let misc_dir = music_dir.join(grouping::misc_folder_name(&existing_music_dirs));
+        let ai_dir = music_dir.join(grouping::ai_folder_name(&existing_music_dirs));
+        let target_dir = |f: &RawFileInfo| match f.track_index.map(|i| &assignments[i]) {
+            Some(Assignment::Folder(name)) => music_dir.join(name),
+            Some(Assignment::Ai) => ai_dir.clone(),
+            Some(Assignment::Misc) => misc_dir.clone(),
+            None => category_dirs[f.category.as_str()].clone(),
+        };
+        let targeted: Vec<(RawFileInfo, PathBuf)> = raw_files
+            .into_iter()
+            .map(|f| {
+                let dir = target_dir(&f);
+                (f, dir)
+            })
+            .collect();
+
+        let (moves, in_place) = Self::plan_moves(targeted);
 
         // المجلدات غير الموجودة التي سيُنشئها التنفيذ
         let mut new_dirs: Vec<PathBuf> = Vec::new();
@@ -401,22 +442,27 @@ impl OrganizerEngine {
         result
     }
 
-    fn extract_audio_info(file_path: &Path) -> (String, String) {
+    /// يرجع (الفنان، العنوان للتجميع، عنوان الوسوم المنظَّف إن كان صالحاً اسماً للملف)
+    fn extract_audio_info(file_path: &Path) -> (String, String, Option<String>) {
         let raw_stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("Track");
         let mut artist = "".to_string();
         let mut title = raw_stem.to_string();
+        let mut tag_title = None;
 
         if let Ok(tagged_file) = Probe::open(file_path).and_then(|p| p.read()) {
             if let Some(tag) = tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) {
                 if let Some(a) = tag.artist() {
-                    let a_trim = a.trim();
-                    if !a_trim.is_empty() && !a_trim.to_lowercase().contains("unknown") && !a_trim.starts_with("AUD-") {
-                        artist = a_trim.to_string();
+                    let a_trim = fix_mojibake(a.trim());
+                    if !a_trim.is_empty() && !a_trim.to_lowercase().contains("unknown") && !a_trim.starts_with("AUD-") && !looks_garbled(&a_trim) {
+                        artist = a_trim;
                     }
                 }
                 if let Some(t) = tag.title() {
-                    if !t.trim().is_empty() {
-                        title = t.trim().to_string();
+                    let t = fix_mojibake(t.trim());
+                    // عنوان مشوّه بترميز خاطئ لا يُستخدم أبداً بدل اسم ملف سليم
+                    if !t.is_empty() && !looks_garbled(&t) {
+                        title = t.clone();
+                        tag_title = Some(Self::clean_string(&t));
                     }
                 }
             }
@@ -433,77 +479,29 @@ impl OrganizerEngine {
         // الفنان يبقى خاماً (وفارغاً إن لم يوجد)؛ يُنظَّف في extract_group_key
         let clean_tit = Self::clean_string(&title);
 
-        (artist, if clean_tit.is_empty() { "Audio Track".to_string() } else { clean_tit })
+        (artist, if clean_tit.is_empty() { "Audio Track".to_string() } else { clean_tit }, tag_title)
+    }
+
+    /// الاسم الجديد: الأغنى بالمعلومات بين اسم الملف وعنوان الوسوم، حتى لا يضيع جزء من الاسم
+    /// ("YouTube (1)" ← عنوان الوسوم الكامل، و"محاضرة - الشيخ - الحلقة 20" يبقى كاملاً)
+    fn best_name(stem: &str, tag_title: Option<String>) -> String {
+        let from_file = Self::clean_string(stem);
+        let letters = |s: &str| s.chars().filter(|c| c.is_alphabetic()).count();
+        match tag_title {
+            Some(t) if letters(&t) > letters(&from_file) => t,
+            _ => from_file,
+        }
     }
 
     /// يرجع (عمليات النقل، عدد الملفات الموجودة أصلاً في مكانها الصحيح)
-    fn plan_moves(files: Vec<RawFileInfo>, category_dirs: &HashMap<&'static str, PathBuf>, keywords: &[String]) -> (Vec<PlannedMove>, usize) {
-        struct ProcessedItem {
-            file: RawFileInfo,
-            group_display_name: String,
-            group_norm_key: String,
-        }
-
-        let mut processed_items: Vec<ProcessedItem> = Vec::new();
-        let mut group_counts: HashMap<String, usize> = HashMap::new();
-        let mut group_canonical_names: HashMap<String, String> = HashMap::new();
+    fn plan_moves(files: Vec<(RawFileInfo, PathBuf)>) -> (Vec<PlannedMove>, usize) {
         // أسماء محجوزة داخل الخطة نفسها (بأحرف صغيرة لأن أسماء ويندوز لا تفرّق بين الحالة)
         let mut reserved: HashSet<String> = HashSet::new();
         let mut moves = Vec::new();
         let mut in_place = 0;
         let lower = |p: &Path| p.to_string_lossy().to_lowercase();
 
-        // مجلدات الفنانين الموجودة داخل مجلد الموسيقى تُعاد استخدامها إذا تطابق الاسم بعد التطبيع
-        let music_dir = &category_dirs["Music"];
-        let existing_artist_dirs: HashMap<String, PathBuf> = fs::read_dir(music_dir)
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-                    .map(|e| (Self::group_key(e.file_name().to_string_lossy().trim()), e.path()))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        for f in files {
-            let (display_name, norm_key) = if f.category == "Music" {
-                Self::extract_group_key(&f.raw_artist_or_group, &f.clean_title, keywords)
-            } else {
-                ("General".to_string(), "general".to_string())
-            };
-
-            if f.category == "Music" && norm_key != "single tracks" {
-                *group_counts.entry(norm_key.clone()).or_insert(0) += 1;
-                group_canonical_names.entry(norm_key.clone()).or_insert(display_name.clone());
-            }
-
-            processed_items.push(ProcessedItem {
-                file: f,
-                group_display_name: display_name,
-                group_norm_key: norm_key,
-            });
-        }
-
-        for item in processed_items {
-            let f = item.file;
-            let target_dir = if f.category == "Music" {
-                let count = group_counts.get(&item.group_norm_key).cloned().unwrap_or(0);
-                // مجلد فنان جديد يُنشأ فقط إذا كانت ملفاته 3 أو أكثر؛ المجلد الموجود يبقى مستخدماً دائماً
-                let has_folder = existing_artist_dirs.contains_key(&item.group_norm_key);
-                if (count >= 3 || has_folder) && item.group_norm_key != "single tracks" {
-                    existing_artist_dirs.get(&item.group_norm_key).cloned().unwrap_or_else(|| {
-                        let canonical_folder_name = group_canonical_names
-                            .get(&item.group_norm_key)
-                            .unwrap_or(&item.group_display_name);
-                        music_dir.join(canonical_folder_name)
-                    })
-                } else {
-                    music_dir.join("Single Tracks")
-                }
-            } else {
-                category_dirs[f.category.as_str()].clone()
-            };
-
+        for (f, target_dir) in files {
             let mut dest_path = target_dir.join(format!("{}.{}", f.new_stem, f.extension));
             let mut counter = 1;
 
@@ -540,7 +538,7 @@ pub(crate) mod tests {
     }
 
     fn group_of(file_name: &str) -> String {
-        let (artist, title) = OrganizerEngine::extract_audio_info(Path::new(file_name));
+        let (artist, title, _) = OrganizerEngine::extract_audio_info(Path::new(file_name));
         group(&artist, &title).0
     }
 
@@ -672,7 +670,7 @@ pub(crate) mod tests {
         organize(&root, &Options::default());
 
         assert!(root.join("Photos/a.jpg").exists());
-        assert!(root.join("الموسيقى/Single Tracks/b.mp3").exists());
+        assert!(root.join("الموسيقى/منوعات/b.mp3").exists());
         assert!(root.join("مستندات/c.docx").exists());
         assert!(!root.join("Pictures").exists() && !root.join("Music").exists() && !root.join("Documents").exists());
         fs::remove_dir_all(&root).unwrap();
@@ -719,7 +717,7 @@ pub(crate) mod tests {
 
         organize(&root, &Options::default());
 
-        assert!(root.join("Music (Array)/Single Tracks/song.mp3").exists());
+        assert!(root.join("Music (Array)/منوعات/song.mp3").exists());
         assert_eq!(fs::read_dir(root.join("Music")).unwrap().count(), 2);
         fs::remove_dir_all(&root).unwrap();
     }
@@ -745,12 +743,13 @@ pub(crate) mod tests {
         assert_eq!(result.done.len(), 6);
         assert!(result.failed.is_empty());
         // رقم الحلقة يبقى في الاسم
-        assert!(root.join("Music/الشيخ محمد/الحلقة 1 - الشيخ محمد.mp3").exists());
+        assert!(root.join("Music/الشيخ محمد/الحلقة 1 - الشيخ محمد.mp3").exists(), "{:?}", tree(&root));
         assert!(root.join("Music/الشيخ محمد/الحلقة 2 - الشيخ محمد.mp3").exists());
         assert!(root.join("Music/الشيخ محمد/الحلقة 3 - الشيخ محمد.mp3").exists());
-        assert!(root.join("Music/Single Tracks/song one.mp3").exists());
+        assert!(root.join("Music/منوعات/song one.mp3").exists());
         assert!(root.join("Pictures/IMG 001.jpg").exists());
-        assert!(root.join("Documents/report.pdf").exists());
+        // الأقواس ذات المعنى تبقى في الاسم
+        assert!(root.join("Documents/report (final).pdf").exists());
         // المجلدات المخفية ومجلدات البرامج لا تُلمس
         assert!(root.join("repo/.git/notes.txt").exists());
         assert!(root.join("repo/readme.txt").exists());
