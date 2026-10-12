@@ -10,6 +10,9 @@ use crate::organizer::{Options, PlannedMove};
 pub struct UndoLog {
     pub source: PathBuf,
     pub moves: Vec<PlannedMove>,
+    /// مجلدات أنشأها التنظيم، فيحذفها التراجع إذا فرغت (المجلدات الأصلية لا تُحذف)
+    #[serde(default)]
+    pub created_dirs: Vec<PathBuf>,
 }
 
 /// ملفات البرنامج في %APPDATA%\Array: الإعدادات وسجل التراجع
@@ -137,7 +140,8 @@ mod tests {
 
         let log = UndoLog {
             source: dir.join("موسيقى"),
-            moves: vec![PlannedMove { from: dir.join("a.mp3"), to: dir.join("Array_Organized/Music/a.mp3") }],
+            moves: vec![PlannedMove { from: dir.join("a.mp3"), to: dir.join("Music/a.mp3") }],
+            created_dirs: vec![dir.join("Music")],
         };
         storage.save_undo(&log).unwrap();
         assert_eq!(storage.load_undo().unwrap(), Some(log));

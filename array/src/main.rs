@@ -9,7 +9,7 @@ mod storage;
 use eframe::egui;
 use organizer::{Options, OrganizerEngine, Plan};
 use rfd::FileDialog;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -96,13 +96,13 @@ impl Preview {
     fn new(plan: Plan, rename_files: bool) -> Self {
         let relative = |path: &Path, base: &Path| path.strip_prefix(base).unwrap_or(path).display().to_string();
 
-        // عدد الملفات لكل فئة، وعدد مجلدات الفنانين داخل Music
+        // عدد الملفات لكل مجلد فئة، وعدد مجلدات الفنانين داخل مجلد الموسيقى
         let mut per_category: BTreeMap<String, usize> = BTreeMap::new();
-        let mut music_folders: BTreeMap<String, ()> = BTreeMap::new();
+        let mut artist_folders: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for m in &plan.moves {
             let parts: Vec<String> = m
                 .to
-                .strip_prefix(&plan.output_base)
+                .strip_prefix(&plan.source)
                 .unwrap_or(&m.to)
                 .components()
                 .filter_map(|c| match c {
@@ -112,33 +112,39 @@ impl Preview {
                 .collect();
             if let Some(category) = parts.first() {
                 *per_category.entry(category.clone()).or_default() += 1;
-                if category == "Music" && parts.len() > 2 && parts[1] != "Single Tracks" {
-                    music_folders.insert(parts[1].clone(), ());
+                // مجلد فرعي داخل مجلد الفئة (يحدث فقط للموسيقى) = مجلد فنان
+                if parts.len() > 2 && parts[1] != "Single Tracks" {
+                    artist_folders.entry(category.clone()).or_default().insert(parts[1].clone());
                 }
             }
         }
         let summary = per_category
             .iter()
             .map(|(category, n)| {
-                if category == "Music" && !music_folders.is_empty() {
-                    let folders = music_folders.len();
-                    format!("{}: {} ({} artist folder{})", category, n, folders, if folders == 1 { "" } else { "s" })
-                } else {
-                    format!("{}: {}", category, n)
+                let state = if plan.new_dirs.contains(&plan.source.join(category)) { "new" } else { "existing" };
+                match artist_folders.get(category).map_or(0, |s| s.len()) {
+                    0 => format!("{} ({} folder): {}", category, state, n),
+                    folders => format!(
+                        "{} ({} folder): {}, {} artist folder{}",
+                        category, state, n, folders, if folders == 1 { "" } else { "s" }
+                    ),
                 }
             })
             .collect::<Vec<_>>()
             .join("   ·   ");
 
-        let headline = format!(
-            "{} files will be moved{} into \"Array_Organized\":",
+        let mut headline = format!(
+            "{} files will be moved{} into category folders inside the selected folder:",
             plan.moves.len(),
             if rename_files { " and renamed" } else { "" }
         );
+        if plan.in_place > 0 {
+            headline.push_str(&format!(" ({} already in the right place)", files(plan.in_place)));
+        }
         let rows = plan
             .moves
             .iter()
-            .map(|m| (rtl::for_display(&relative(&m.from, &plan.source)), rtl::for_display(&relative(&m.to, &plan.output_base))))
+            .map(|m| (rtl::for_display(&relative(&m.from, &plan.source)), rtl::for_display(&relative(&m.to, &plan.source))))
             .collect();
 
         let skipped = plan
@@ -210,11 +216,15 @@ impl ArrayApp {
             Job::Planning(rx) => match poll(rx) {
                 None => return,
                 Some(Ok(plan)) if plan.moves.is_empty() => {
-                    self.status_message = "No files to organize in this folder.".to_string();
+                    self.status_message = if plan.in_place > 0 {
+                        format!("This folder is already organized ({} in the right place).", files(plan.in_place))
+                    } else {
+                        "No files to organize in this folder.".to_string()
+                    };
                     if !plan.skipped.is_empty() {
                         self.status_message.push_str(&format!(
-                            " {} program or project folders were left untouched.",
-                            plan.skipped.len()
+                            " {} left untouched.",
+                            folders(plan.skipped.len())
                         ));
                     }
                 }
@@ -257,17 +267,17 @@ impl ArrayApp {
         let rx = spawn_job(ctx, move || {
             // السجل يُحفظ قبل نقل أي ملف؛ إن تعذّر حفظه لا يُنقل شيء
             storage
-                .save_undo(&UndoLog { source: plan.source.clone(), moves: plan.moves.clone() })
+                .save_undo(&UndoLog { source: plan.source.clone(), moves: plan.moves.clone(), created_dirs: plan.new_dirs.clone() })
                 .map_err(|e| format!("{} Nothing was moved.", e))?;
             let result = OrganizerEngine::execute(&plan, &counter);
             // السجل يحتفظ فقط بما نُقل فعلاً
             let saved = if result.done.is_empty() {
                 storage.clear_undo()
             } else {
-                storage.save_undo(&UndoLog { source: plan.source.clone(), moves: result.done.clone() })
+                storage.save_undo(&UndoLog { source: plan.source.clone(), moves: result.done.clone(), created_dirs: plan.new_dirs.clone() })
             };
 
-            let mut msg = format!("✔ Moved {} files into {}", result.done.len(), plan.output_base.display());
+            let mut msg = format!("✔ Organized {} files in {}", result.done.len(), plan.source.display());
             if !result.failed.is_empty() {
                 msg.push_str(&format!(
                     "\n⚠ {} files could not be moved (in use, access denied, or a file with the same name appeared) and were left in place.",
@@ -292,12 +302,12 @@ impl ArrayApp {
             let Some(log) = storage.load_undo()? else {
                 return Err("There is nothing to undo.".to_string());
             };
-            let result = OrganizerEngine::undo(&log.moves, &log.source, &counter);
+            let result = OrganizerEngine::undo(&log.moves, &log.source, &log.created_dirs, &counter);
             // الملفات التي لم تُرجع تبقى في السجل لإعادة المحاولة
             if result.failed.is_empty() {
                 storage.clear_undo()?;
             } else {
-                storage.save_undo(&UndoLog { source: log.source.clone(), moves: result.failed.clone() })?;
+                storage.save_undo(&UndoLog { source: log.source.clone(), moves: result.failed.clone(), created_dirs: log.created_dirs.clone() })?;
             }
 
             let mut msg = format!("↩ Restored {} files to their original places in {}", result.done.len(), log.source.display());
@@ -442,8 +452,8 @@ impl ArrayApp {
         ui.label(rtl::for_display(&preview.summary));
         if !preview.skipped.is_empty() {
             egui::CollapsingHeader::new(format!(
-                "🛡 {} program or project folders will not be touched (click to see)",
-                preview.skipped.len()
+                "🛡 {} will not be touched (click to see)",
+                folders(preview.skipped.len())
             ))
             .id_source("skipped_folders")
             .show(ui, |ui| {
@@ -524,6 +534,14 @@ impl ArrayApp {
                 });
             });
     }
+}
+
+fn files(n: usize) -> String {
+    if n == 1 { "1 file".to_string() } else { format!("{} files", n) }
+}
+
+fn folders(n: usize) -> String {
+    if n == 1 { "1 program or project folder".to_string() } else { format!("{} program or project folders", n) }
 }
 
 /// خلية بعرض ثابت؛ الاسم الطويل يُختصر ويظهر كاملاً عند المرور عليه
