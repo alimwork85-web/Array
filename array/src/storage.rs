@@ -43,6 +43,29 @@ impl Storage {
         self.dir.join("face_cache.json")
     }
 
+    /// مجلد بيانات البرنامج (الإعدادات، سجل التراجع، ذاكرة الوجوه)
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// وقت حفظ سجل آخر تنظيم
+    pub fn undo_saved_at(&self) -> Option<std::time::SystemTime> {
+        fs::metadata(self.undo_path()).and_then(|m| m.modified()).ok()
+    }
+
+    /// حجم ذاكرة الوجوه بالبايت (0 إن لم توجد)
+    pub fn face_cache_size(&self) -> u64 {
+        fs::metadata(self.face_cache_path()).map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// مسح ذاكرة الوجوه: تُعاد بناؤها تلقائياً في التحليل التالي
+    pub fn clear_face_cache(&self) -> Result<(), String> {
+        match fs::remove_file(self.face_cache_path()) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("Could not clear the face memory: {}", e)),
+            _ => Ok(()),
+        }
+    }
+
     fn undo_path(&self) -> PathBuf {
         self.dir.join("last_organize.json")
     }
