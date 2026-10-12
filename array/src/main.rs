@@ -8,7 +8,9 @@ use eframe::egui;
 use organizer::OrganizerEngine;
 use rfd::FileDialog;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
+use std::thread;
 
 fn main() -> eframe::Result<()> {
     let icon = create_app_icon();
@@ -78,6 +80,8 @@ fn create_app_icon() -> egui::IconData {
 struct ArrayApp {
     selected_path: Option<PathBuf>,
     status_message: String,
+    /// نتيجة التنظيم الجاري في الخلفية (None عندما لا يوجد عمل)
+    pending: Option<Receiver<Result<String, String>>>,
 }
 
 impl Default for ArrayApp {
@@ -85,12 +89,27 @@ impl Default for ArrayApp {
         Self {
             selected_path: None,
             status_message: "Please select a folder to organize...".to_string(),
+            pending: None,
         }
     }
 }
 
 impl eframe::App for ArrayApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some(rx) = &self.pending {
+            let finished = match rx.try_recv() {
+                Ok(Ok(msg)) => Some(msg),
+                Ok(Err(err)) => Some(format!("❌ Error: {}", err)),
+                Err(TryRecvError::Disconnected) => Some("❌ Error: organizing stopped unexpectedly".to_string()),
+                Err(TryRecvError::Empty) => None,
+            };
+            if let Some(msg) = finished {
+                self.status_message = msg;
+                self.pending = None;
+            }
+        }
+        let busy = self.pending.is_some();
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(20.0);
@@ -98,7 +117,7 @@ impl eframe::App for ArrayApp {
                 ui.label("Smart Media & Document Organization Engine");
                 ui.add_space(20.0);
 
-                if ui.button("📁 Select Folder").clicked() {
+                if ui.add_enabled(!busy, egui::Button::new("📁 Select Folder")).clicked() {
                     if let Some(path) = FileDialog::new().pick_folder() {
                         self.selected_path = Some(path);
                         self.status_message = "Ready to start organizing...".to_string();
@@ -111,11 +130,17 @@ impl eframe::App for ArrayApp {
                     ui.label(format!("Selected: {}", path.display()));
                     ui.add_space(15.0);
 
-                    if ui.button("⚡ Start Organizing Now").clicked() {
-                        self.status_message = match OrganizerEngine::process_directory(path) {
-                            Ok(msg) => msg,
-                            Err(err) => format!("❌ Error: {}", err),
-                        };
+                    if ui.add_enabled(!busy, egui::Button::new("⚡ Start Organizing Now")).clicked() {
+                        // العمل في خيط منفصل حتى لا تتجمد النافذة مع المجلدات الكبيرة
+                        let (tx, rx) = mpsc::channel();
+                        let path = path.clone();
+                        let ctx = ctx.clone();
+                        thread::spawn(move || {
+                            let _ = tx.send(OrganizerEngine::process_directory(&path));
+                            ctx.request_repaint();
+                        });
+                        self.pending = Some(rx);
+                        self.status_message = "⏳ Organizing... please wait".to_string();
                     }
                 }
 
