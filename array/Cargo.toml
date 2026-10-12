@@ -1,0 +1,15 @@
+[package]
+name = "array"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+walkdir = "2.5"
+lofty = "0.21"
+rfd = "0.14"
+eframe = "0.27"
+regex = "1.10"
+image = "0.24"
+
+[build-dependencies]
+winres = "0.1"
