@@ -2,6 +2,7 @@
 
 mod faces;
 mod grouping;
+mod i18n;
 mod icons;
 mod naming;
 mod normalizer;
@@ -14,6 +15,8 @@ mod theme;
 use chrono::{DateTime, Local};
 use eframe::egui::{self, RichText};
 
+use i18n::{ar, count, tr, Noun};
+use icons::Icon;
 use organizer::{Options, OrganizerEngine, Plan, PlanProgress};
 use rfd::FileDialog;
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,8 +27,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use storage::{Storage, UndoLog};
-use icons::Icon;
-use theme::{pal, Kind};
+use theme::{pal, t, Kind};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -79,7 +81,7 @@ enum Job {
     Planning(Receiver<Result<Plan, String>>, Arc<PlanProgress>),
     /// تنظيم أو تراجع، مع عدّاد الملفات المنجزة لشريط التقدم
     Moving {
-        label: &'static str,
+        restoring: bool,
         rx: Receiver<Result<String, String>>,
         progress: Arc<AtomicUsize>,
         total: usize,
@@ -101,20 +103,21 @@ fn spawn_job<T: Send + 'static>(ctx: &egui::Context, work: impl FnOnce() -> T + 
 fn poll<T>(rx: &Receiver<Result<T, String>>) -> Option<Result<T, String>> {
     match rx.try_recv() {
         Ok(result) => Some(result),
-        Err(TryRecvError::Disconnected) => Some(Err("the operation stopped unexpectedly".to_string())),
+        Err(TryRecvError::Disconnected) => Some(Err(tr("The operation stopped unexpectedly.", "توقفت العملية بشكل غير متوقع.").to_string())),
         Err(TryRecvError::Empty) => None,
     }
 }
 
-/// اسم المجلد المختار نفسه في ملخص المعاينة
-const THIS_FOLDER: &str = "This folder";
+/// المجلد المختار نفسه في ملخص المعاينة
+const THIS_FOLDER: &str = "\u{1}this-folder";
 
-/// خطة جاهزة للعرض: النصوص محسوبة مرة واحدة وليس في كل إطار
+/// خطة جاهزة للعرض. النصوص تُحفظ بترتيبها المنطقي وتُجهّز للرسم عند العرض
 struct Preview {
     plan: Plan,
     /// (اسم المجلد، عدد الملفات، موجود أم جديد، عدد مجلدات الفنانين)
     destinations: Vec<(String, usize, bool, usize)>,
-    rows: Vec<(String, String)>,
+    /// (المكان الحالي، المكان الجديد، درجة الوجه إن وُجدت)
+    rows: Vec<(String, String, Option<f32>)>,
     /// مجلدات برامج ومشاريع تُركت كما هي، مع السبب
     skipped: Vec<String>,
 }
@@ -157,20 +160,10 @@ impl Preview {
         let rows = plan
             .moves
             .iter()
-            .map(|m| {
-                let mut to = relative(&m.to, &plan.source);
-                if let Some((_, score)) = plan.face_matches.get(&m.from) {
-                    to.push_str(&format!("   ·  face {:.0}%", score * 100.0));
-                }
-                (rtl::for_display(&relative(&m.from, &plan.source)), rtl::for_display(&to))
-            })
+            .map(|m| (relative(&m.from, &plan.source), relative(&m.to, &plan.source), plan.face_matches.get(&m.from).map(|(_, s)| *s)))
             .collect();
 
-        let skipped = plan
-            .skipped
-            .iter()
-            .map(|(dir, reason)| rtl::for_display(&format!("{}  —  {}", relative(dir, &plan.source), reason)))
-            .collect();
+        let skipped = plan.skipped.iter().map(|(dir, reason)| format!("{}  —  {}", relative(dir, &plan.source), reason)).collect();
 
         Self { plan, destinations, rows, skipped }
     }
@@ -208,15 +201,23 @@ struct ArrayApp {
     undo_source: Option<PathBuf>,
     confirm_undo: bool,
     confirm_clear_faces: bool,
+    show_skipped: bool,
     /// السمة المطبّقة حالياً (None قبل أول إطار)
     dark: Option<bool>,
 }
 
+fn ready_message() -> String {
+    tr("Choose a folder to start.", "اختر مجلداً للبدء.").to_string()
+}
+
 impl ArrayApp {
     fn new(ctx: &egui::Context, storage: Storage) -> Self {
-        let (options, status_message) = match storage.load_settings() {
-            Ok(options) => (options, "Choose a folder to start.".to_string()),
-            Err(err) => (Options::default(), format!("⚠ {}", err)),
+        let loaded = storage.load_settings();
+        let options = loaded.as_ref().map(|o| o.clone()).unwrap_or_default();
+        i18n::set_arabic(options.language != "en");
+        let status_message = match loaded {
+            Ok(_) => ready_message(),
+            Err(err) => format!("⚠ {}", err),
         };
         let mut app = Self {
             storage,
@@ -233,6 +234,7 @@ impl ArrayApp {
             undo_source: None,
             confirm_undo: false,
             confirm_clear_faces: false,
+            show_skipped: false,
             dark: None,
         };
         app.refresh_undo();
@@ -265,23 +267,36 @@ impl ArrayApp {
                 None => return,
                 Some(Ok(plan)) if plan.moves.is_empty() => {
                     let mut message = if plan.kept_in_folders > 0 {
-                        format!(
-                            "Nothing to organize: the loose files are already in place and {} in your existing folders are left as they are.",
-                            files(plan.kept_in_folders)
-                        )
+                        if ar() {
+                            format!("لا شيء للترتيب: الملفات المتفرقة في مكانها، و{} في مجلداتك تبقى كما هي.", count(plan.kept_in_folders, Noun::File))
+                        } else {
+                            format!(
+                                "Nothing to organize: the loose files are already in place and {} in your existing folders are left as they are.",
+                                count(plan.kept_in_folders, Noun::File)
+                            )
+                        }
                     } else if plan.in_place > 0 {
-                        format!("This folder is already organized ({} in the right place).", files(plan.in_place))
+                        if ar() {
+                            format!("هذا المجلد مرتّب أصلاً ({} في مكانها الصحيح).", count(plan.in_place, Noun::File))
+                        } else {
+                            format!("This folder is already organized ({} in the right place).", count(plan.in_place, Noun::File))
+                        }
                     } else {
-                        "No files to organize in this folder.".to_string()
+                        tr("No files to organize in this folder.", "لا توجد ملفات للترتيب في هذا المجلد.").to_string()
                     };
                     if !plan.skipped.is_empty() {
-                        message.push_str(&format!(" {} left untouched.", folders(plan.skipped.len())));
+                        message.push_str(&if ar() {
+                            format!(" وتُرك {} دون لمس.", count(plan.skipped.len(), Noun::ProtectedFolder))
+                        } else {
+                            format!(" {} left untouched.", count(plan.skipped.len(), Noun::ProtectedFolder))
+                        });
                     }
                     self.status_message = message.clone();
                     self.outcome = Some(Outcome { message, folder: plan.source.clone(), ok: true });
                 }
                 Some(Ok(plan)) => {
-                    self.status_message = "Review where each file will go, then confirm.".to_string();
+                    self.status_message = tr("Review where each file will go, then confirm.", "راجع إلى أين سيذهب كل ملف، ثم أكّد.").to_string();
+                    self.show_skipped = false;
                     self.preview = Some(Preview::new(plan));
                 }
                 Some(Err(err)) => {
@@ -320,7 +335,7 @@ impl ArrayApp {
     fn select_folder(&mut self, path: PathBuf) {
         self.selected_path = Some(path);
         self.outcome = None;
-        self.status_message = "Ready. Press Preview to see where each file will go.".to_string();
+        self.status_message = tr("Ready. Press Preview to see where each file will go.", "جاهز. اضغط معاينة لترى أين سيذهب كل ملف.").to_string();
     }
 
     fn start_planning(&mut self, ctx: &egui::Context, path: PathBuf) {
@@ -334,7 +349,7 @@ impl ArrayApp {
             spawn_job(ctx, move || OrganizerEngine::plan_with(&path, &options, &shared, Some(&cache))),
             progress,
         ));
-        self.status_message = "⏳ Scanning files...".to_string();
+        self.status_message = format!("⏳ {}", tr("Scanning files…", "جارٍ فحص الملفات…"));
     }
 
     fn start_organizing(&mut self, ctx: &egui::Context, plan: Plan) {
@@ -347,7 +362,7 @@ impl ArrayApp {
             // السجل يُحفظ قبل نقل أي ملف؛ إن تعذّر حفظه لا يُنقل شيء
             storage
                 .save_undo(&UndoLog { source: plan.source.clone(), moves: plan.moves.clone(), created_dirs: plan.new_dirs.clone() })
-                .map_err(|e| format!("{} Nothing was moved.", e))?;
+                .map_err(|e| format!("{} {}", e, tr("Nothing was moved.", "لم يُنقل أي ملف.")))?;
             let result = OrganizerEngine::execute(&plan, &counter);
             // السجل يحتفظ فقط بما نُقل فعلاً
             let saved = if result.done.is_empty() {
@@ -356,20 +371,27 @@ impl ArrayApp {
                 storage.save_undo(&UndoLog { source: plan.source.clone(), moves: result.done.clone(), created_dirs: plan.new_dirs.clone() })
             };
 
-            let mut msg = format!("✔ Organized {} in {}", files(result.done.len()), folder_name(&plan.source));
+            let done = count(result.done.len(), Noun::File);
+            let mut msg = if ar() {
+                format!("✔ رُتّب {} في {}", done, folder_name(&plan.source))
+            } else {
+                format!("✔ Organized {} in {}", done, folder_name(&plan.source))
+            };
             if !result.failed.is_empty() {
-                msg.push_str(&format!(
-                    "\n⚠ {} could not be moved (in use, access denied, or a file with the same name appeared) and were left in place.",
-                    files(result.failed.len())
-                ));
+                let failed = count(result.failed.len(), Noun::File);
+                msg.push_str(&if ar() {
+                    format!("\n⚠ تعذّر نقل {} (مفتوح في برنامج آخر، أو بلا صلاحية، أو ظهر ملف بنفس الاسم) فبقي في مكانه.", failed)
+                } else {
+                    format!("\n⚠ {} could not be moved (in use, access denied, or a file with the same name appeared) and were left in place.", failed)
+                });
             }
             if let Err(e) = saved {
                 msg.push_str(&format!("\n⚠ {}", e));
             }
             Ok(msg)
         });
-        self.job = Some(Job::Moving { label: "Organizing", rx, progress, total, folder });
-        self.status_message = "⏳ Organizing... please wait".to_string();
+        self.job = Some(Job::Moving { restoring: false, rx, progress, total, folder });
+        self.status_message = format!("⏳ {}", tr("Organizing… please wait", "جارٍ الترتيب… لحظات"));
     }
 
     fn start_undo(&mut self, ctx: &egui::Context) {
@@ -380,7 +402,7 @@ impl ArrayApp {
         let counter = progress.clone();
         let rx = spawn_job(ctx, move || {
             let Some(log) = storage.load_undo()? else {
-                return Err("There is nothing to undo.".to_string());
+                return Err(tr("There is nothing to undo.", "لا يوجد ما يمكن التراجع عنه.").to_string());
             };
             let result = OrganizerEngine::undo(&log.moves, &log.source, &log.created_dirs, &counter);
             // الملفات التي لم تُرجع تبقى في السجل لإعادة المحاولة
@@ -390,18 +412,25 @@ impl ArrayApp {
                 storage.save_undo(&UndoLog { source: log.source.clone(), moves: result.failed.clone(), created_dirs: log.created_dirs.clone() })?;
             }
 
-            let mut msg = format!("↩ Restored {} to their original places in {}", files(result.done.len()), folder_name(&log.source));
+            let done = count(result.done.len(), Noun::File);
+            let mut msg = if ar() {
+                format!("↩ أُعيد {} إلى أماكنها الأصلية في {}", done, folder_name(&log.source))
+            } else {
+                format!("↩ Restored {} to their original places in {}", done, folder_name(&log.source))
+            };
             if !result.failed.is_empty() {
-                msg.push_str(&format!(
-                    "\n⚠ {} could not be restored (moved, renamed, in use, or a new file has the same name). Press Undo again to retry them.",
-                    files(result.failed.len())
-                ));
+                let failed = count(result.failed.len(), Noun::File);
+                msg.push_str(&if ar() {
+                    format!("\n⚠ تعذّرت إعادة {} (نُقل أو أُعيدت تسميته أو مفتوح أو يوجد ملف جديد بنفس الاسم). اضغط تراجع مرة أخرى لإعادة المحاولة.", failed)
+                } else {
+                    format!("\n⚠ {} could not be restored (moved, renamed, in use, or a new file has the same name). Press Undo again to retry them.", failed)
+                });
             }
             Ok(msg)
         });
-        self.job = Some(Job::Moving { label: "Restoring", rx, progress, total, folder });
+        self.job = Some(Job::Moving { restoring: true, rx, progress, total, folder });
         self.page = Page::Organize;
-        self.status_message = "⏳ Restoring files... please wait".to_string();
+        self.status_message = format!("⏳ {}", tr("Restoring files… please wait", "جارٍ إعادة الملفات… لحظات"));
     }
 
     fn set_option(&mut self, change: impl Fn(&mut Options)) {
@@ -416,9 +445,18 @@ impl ArrayApp {
             }
             Err(err) => {
                 change(&mut self.options);
-                self.status_message = format!("⚠ {} This choice is used for now but not saved.", err);
+                self.status_message = format!("⚠ {} {}", err, tr("This choice is used for now but not saved.", "يُستخدم هذا الاختيار الآن لكنه لم يُحفظ."));
             }
         }
+    }
+
+    fn set_language(&mut self, arabic: bool) {
+        let value = if arabic { "ar" } else { "en" }.to_string();
+        self.set_option(move |o| o.language = value.clone());
+        i18n::set_arabic(arabic);
+        // الرسائل السابقة كُتبت باللغة القديمة
+        self.status_message = ready_message();
+        self.outcome = None;
     }
 
     fn open_settings_file(&mut self) {
@@ -430,14 +468,14 @@ impl ArrayApp {
             }
         }
         self.status_message = match std::process::Command::new("notepad").arg(&path).spawn() {
-            Ok(_) => "Edit the lists in Notepad and save. They are used from the next preview.".to_string(),
-            Err(err) => format!("⚠ Could not open {}: {}", path.display(), err),
+            Ok(_) => tr("Edit the lists in Notepad and save. They are used from the next preview.", "عدّل القوائم في Notepad واحفظ. تُستخدم من المعاينة التالية.").to_string(),
+            Err(err) => format!("⚠ {} {}: {}", tr("Could not open", "تعذّر فتح"), path.display(), err),
         };
     }
 
     fn open_in_explorer(&mut self, path: &Path) {
         if let Err(err) = std::process::Command::new("explorer").arg(path).spawn() {
-            self.status_message = format!("⚠ Could not open {}: {}", path.display(), err);
+            self.status_message = format!("⚠ {} {}: {}", tr("Could not open", "تعذّر فتح"), path.display(), err);
         }
     }
 
@@ -445,48 +483,55 @@ impl ArrayApp {
 
     fn sidebar(&mut self, ctx: &egui::Context) {
         let p = pal();
-        egui::SidePanel::left("nav")
+        let panel = if ar() { egui::SidePanel::right("nav") } else { egui::SidePanel::left("nav") };
+        panel
             .exact_width(228.0)
             .resizable(false)
-            .frame(egui::Frame::none().fill(p.sidebar).inner_margin(egui::Margin::symmetric(14.0, 22.0)))
+            // الهوامش داخل إطار ثانٍ: egui يجعل عرض المحتوى نفسه 228 فيتجاوز الإطار حافة النافذة اليمنى
+            .frame(egui::Frame::none().fill(p.sidebar))
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add_space(4.0);
-                    if let Some(logo) = &self.logo {
-                        ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(logo.id(), [42.0, 42.0])));
-                    }
-                    ui.vertical(|ui| {
-                        ui.label(theme::strong("Array", 21.0));
-                        ui.label(theme::muted("File organizer").small());
-                    });
-                });
-                ui.add_space(28.0);
-
-                let busy = self.busy();
-                for (page, icon, name) in [
-                    (Page::Organize, Icon::Organize, "Organize"),
-                    (Page::History, Icon::History, "History"),
-                    (Page::Settings, Icon::Settings, "Settings"),
-                    (Page::About, Icon::About, "About"),
-                ] {
-                    // أثناء المعاينة أو العمل تبقى صفحة التنظيم ظاهرة
-                    if theme::nav_item(ui, icon, name, self.page == page, !busy || page == Page::Organize).clicked() {
-                        self.page = page;
-                    }
-                    ui.add_space(2.0);
-                }
-
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                    ui.label(theme::muted(format!("Version {}", VERSION)).small());
-                    theme::icon_text(ui, Icon::Lock, theme::muted("Works offline on this PC").small(), p.muted);
-                });
+                egui::Frame::none().inner_margin(egui::Margin::symmetric(14.0, 22.0)).show(ui, |ui| self.sidebar_contents(ui));
             });
+    }
+
+    fn sidebar_contents(&mut self, ui: &mut egui::Ui) {
+        let p = pal();
+        theme::row(ui, |ui| {
+            ui.add_space(4.0);
+            if let Some(logo) = &self.logo {
+                ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(logo.id(), [42.0, 42.0])));
+            }
+            theme::column(ui, |ui| {
+                ui.label(theme::strong("Array", 21.0));
+                ui.label(theme::muted(t("File organizer", "منظّم الملفات")).small());
+            });
+        });
+        ui.add_space(34.0);
+
+        let busy = self.busy();
+        for (page, icon, en, arabic) in [
+            (Page::Organize, Icon::Organize, "Organize", "التنظيم"),
+            (Page::History, Icon::History, "History", "السجل"),
+            (Page::Settings, Icon::Settings, "Settings", "الإعدادات"),
+            (Page::About, Icon::About, "About", "حول"),
+        ] {
+            // أثناء المعاينة أو العمل تبقى صفحة التنظيم ظاهرة
+            if theme::nav_item(ui, icon, tr(en, arabic), self.page == page, !busy || page == Page::Organize).clicked() {
+                self.page = page;
+            }
+            ui.add_space(2.0);
+        }
+
+        ui.with_layout(egui::Layout::bottom_up(if ar() { egui::Align::Max } else { egui::Align::Min }), |ui| {
+            ui.label(theme::muted(t(&format!("Version {}", VERSION), &format!("الإصدار {}", VERSION))).small());
+            theme::icon_text(ui, Icon::Lock, theme::muted(t("Works offline on this PC", "يعمل دون إنترنت على جهازك")).small(), p.muted);
+        });
     }
 
     fn page_header(ui: &mut egui::Ui, title: &str, subtitle: &str) {
         ui.add_space(4.0);
-        ui.label(theme::strong(title, 28.0));
-        ui.label(theme::muted(subtitle));
+        ui.label(theme::strong(theme::show(title), 28.0));
+        theme::para(ui, subtitle, 15.0, pal().muted, false);
         ui.add_space(16.0);
     }
 
@@ -496,94 +541,112 @@ impl ArrayApp {
             return;
         }
         if self.job.is_some() {
-            Self::page_header(ui, "Organizing", "Working on it — you can keep using your computer.");
+            Self::page_header(ui, tr("Organizing", "جارٍ الترتيب"), tr("Working on it — you can keep using your computer.", "العمل جارٍ — يمكنك متابعة استخدام جهازك."));
             self.progress_view(ui);
             return;
         }
 
-        Self::page_header(ui, "Organize a folder", "Sort loose photos, music, videos and documents into tidy folders. Nothing moves until you confirm.");
+        Self::page_header(
+            ui,
+            tr("Organize a folder", "رتّب مجلداً"),
+            tr(
+                "Sort loose photos, music, videos and documents into tidy folders. Nothing moves until you confirm.",
+                "يرتّب الصور والموسيقى والفيديو والمستندات المتفرقة في مجلدات مرتبة. لا يتحرك أي ملف قبل موافقتك.",
+            ),
+        );
         let p = pal();
 
         egui::ScrollArea::vertical().auto_shrink([false, false]).max_height((ui.available_height() - 60.0).max(120.0)).show(ui, |ui| {
-            if let Some(outcome) = self.outcome.take() {
-                if self.outcome_view(ui, &outcome) {
-                    self.outcome = Some(outcome);
+            theme::column(ui, |ui| {
+                if let Some(outcome) = self.outcome.take() {
+                    if self.outcome_view(ui, &outcome) {
+                        self.outcome = Some(outcome);
+                    }
+                    ui.add_space(14.0);
                 }
-                ui.add_space(14.0);
-            }
 
-            // الخطوة 1: المجلد
-            theme::card(ui, |ui| {
-                theme::step_title(ui, "1", "Choose a folder");
-                ui.add_space(10.0);
-                let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
-                egui::Frame::none()
-                    .fill(if hovering { p.selected } else { p.inset })
-                    .stroke(egui::Stroke::new(if hovering { 2.0_f32 } else { 1.0_f32 }, if hovering { p.accent } else { p.border }))
-                    .rounding(theme::RADIUS)
-                    .inner_margin(egui::Margin::same(20.0))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        match self.selected_path.clone() {
-                            Some(path) => {
-                                ui.horizontal(|ui| {
-                                    icons::show(ui, Icon::Folder, 34.0, p.accent);
-                                    ui.vertical(|ui| {
-                                        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.display().to_string());
-                                        ui.label(theme::strong(rtl::for_display(&name), 18.0));
+                // الخطوة 1: المجلد
+                theme::card(ui, |ui| {
+                    theme::step_title(ui, "1", &t("Choose a folder", "اختر مجلداً"));
+                    ui.add_space(10.0);
+                    let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
+                    egui::Frame::none()
+                        .fill(if hovering { p.selected } else { p.inset })
+                        .stroke(egui::Stroke::new(if hovering { 2.0_f32 } else { 1.0_f32 }, if hovering { p.accent } else { p.border }))
+                        .rounding(theme::RADIUS)
+                        .inner_margin(egui::Margin::same(20.0))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            match self.selected_path.clone() {
+                                Some(path) => {
+                                    theme::column(ui, |ui| {
+                                        theme::row(ui, |ui| {
+                                            icons::show(ui, Icon::Folder, 34.0, p.accent);
+                                            ui.label(theme::strong(rtl::for_display(&folder_name(&path)), 18.0));
+                                        });
                                         ui.label(theme::muted(rtl::for_display(&path.display().to_string())).small());
+                                        ui.add_space(10.0);
+                                        theme::row(ui, |ui| {
+                                            if theme::button(ui, Kind::Secondary, Some(Icon::Folder), tr("Change folder", "تغيير المجلد"), true).clicked() {
+                                                if let Some(picked) = FileDialog::new().pick_folder() {
+                                                    self.select_folder(picked);
+                                                }
+                                            }
+                                            if theme::button(ui, Kind::Ghost, Some(Icon::External), tr("Open in Explorer", "فتح في المستكشف"), true).clicked() {
+                                                self.open_in_explorer(&path);
+                                            }
+                                        });
                                     });
-                                });
-                                ui.add_space(10.0);
-                                ui.horizontal(|ui| {
-                                    if theme::button(ui, Kind::Secondary, Some(Icon::Folder), "Change folder", true).clicked() {
-                                        if let Some(picked) = FileDialog::new().pick_folder() {
-                                            self.select_folder(picked);
+                                }
+                                None => {
+                                    ui.vertical_centered(|ui| {
+                                        icons::show(ui, Icon::Drop, 40.0, if hovering { p.accent } else { p.muted });
+                                        ui.add_space(4.0);
+                                        let title = if hovering {
+                                            t("Release to choose this folder", "أفلِت لاختيار هذا المجلد")
+                                        } else {
+                                            t("Drop a folder here", "اسحب مجلداً وأفلته هنا")
+                                        };
+                                        ui.label(theme::strong(title, 17.0));
+                                        ui.label(theme::muted(t("or", "أو")));
+                                        if theme::button(ui, Kind::Secondary, Some(Icon::Folder), tr("Browse…", "استعراض…"), true).clicked() {
+                                            if let Some(picked) = FileDialog::new().pick_folder() {
+                                                self.select_folder(picked);
+                                            }
                                         }
-                                    }
-                                    if theme::button(ui, Kind::Ghost, Some(Icon::External), "Open in Explorer", true).clicked() {
-                                        self.open_in_explorer(&path);
-                                    }
-                                });
+                                    });
+                                }
                             }
-                            None => {
-                                ui.vertical_centered(|ui| {
-                                    icons::show(ui, Icon::Drop, 40.0, if hovering { p.accent } else { p.muted });
-                                    ui.add_space(4.0);
-                                    ui.label(theme::strong(if hovering { "Release to choose this folder" } else { "Drop a folder here" }, 17.0));
-                                    ui.label(theme::muted("or"));
-                                    if theme::button(ui, Kind::Secondary, Some(Icon::Folder), "Browse…", true).clicked() {
-                                        if let Some(picked) = FileDialog::new().pick_folder() {
-                                            self.select_folder(picked);
-                                        }
-                                    }
-                                });
-                            }
-                        }
-                    });
-            });
-            ui.add_space(14.0);
+                        });
+                });
+                ui.add_space(14.0);
 
-            // الخطوة 2: الخيارات
-            theme::card(ui, |ui| {
-                theme::step_title(ui, "2", "How to organize");
-                ui.add_space(10.0);
-                self.option_toggles(ui, true);
+                // الخطوة 2: الخيارات
+                theme::card(ui, |ui| {
+                    theme::step_title(ui, "2", &t("How to organize", "طريقة الترتيب"));
+                    ui.add_space(10.0);
+                    self.option_toggles(ui, true);
+                });
+                ui.add_space(8.0);
             });
-            ui.add_space(8.0);
         });
 
         // الخطوة 3: زر المعاينة مثبّت أسفل الصفحة فيبقى ظاهراً دائماً
         ui.add_space(12.0);
-        ui.horizontal(|ui| {
+        theme::row(ui, |ui| {
             let can_start = self.selected_path.is_some();
-            if theme::button(ui, Kind::Primary, Some(Icon::Search), "Preview changes", can_start).clicked() {
+            if theme::button(ui, Kind::Primary, Some(Icon::Search), tr("Preview changes", "معاينة التغييرات"), can_start).clicked() {
                 if let Some(path) = self.selected_path.clone() {
                     self.start_planning(ctx, path);
                 }
             }
             ui.add_space(6.0);
-            ui.label(theme::muted(if can_start { "You will see every change before anything moves." } else { "Choose a folder first." }));
+            let hint = if can_start {
+                t("You will see every change before anything moves.", "سترى كل تغيير قبل أن يتحرك أي ملف.")
+            } else {
+                t("Choose a folder first.", "اختر مجلداً أولاً.")
+            };
+            ui.label(theme::muted(hint));
         });
     }
 
@@ -591,31 +654,40 @@ impl ArrayApp {
     fn option_toggles(&mut self, ui: &mut egui::Ui, detailed: bool) {
         let mut keep = self.options.keep_existing_folders;
         let help = if detailed {
-            "Files already inside subfolders are not moved or renamed. Turn off to empty and rebuild all subfolders."
+            tr(
+                "Files already inside subfolders are not moved or renamed. Turn off to empty and rebuild all subfolders.",
+                "الملفات الموجودة داخل المجلدات الفرعية لا تُنقل ولا يُعاد تسميتها. أوقفه لتفريغ كل المجلدات الفرعية وإعادة بنائها.",
+            )
         } else {
-            "Only loose files are organized."
+            tr("Only loose files are organized.", "تُرتَّب الملفات المتفرقة فقط.")
         };
-        if theme::toggle_row(ui, true, &mut keep, "Keep my existing folders as they are", help) {
+        if theme::toggle_row(ui, true, &mut keep, tr("Keep my existing folders as they are", "أبقِ مجلداتي الحالية كما هي"), help) {
             self.set_option(|o| o.keep_existing_folders = keep);
         }
         ui.add_space(8.0);
         let mut by_faces = self.options.sort_by_faces;
         let help = if detailed {
-            "Learns faces from folders like Ali or Mom and suggests a photo only when one known person is clearly recognized."
+            tr(
+                "Learns faces from folders like Ali or Mom and suggests a photo only when one known person is clearly recognized.",
+                "يتعلّم الوجوه من مجلدات مثل Ali أو Mom، ولا يقترح نقل صورة إلا إذا تعرّف بوضوح على شخص معروف واحد.",
+            )
         } else {
-            "Needs 'Keep my existing folders'."
+            tr("Needs 'Keep my existing folders'.", "يحتاج خيار «أبقِ مجلداتي الحالية».")
         };
-        if theme::toggle_row(ui, keep, &mut by_faces, "Sort loose photos into people folders by face", help) {
+        if theme::toggle_row(ui, keep, &mut by_faces, tr("Sort loose photos into people folders by face", "رتّب الصور المتفرقة في مجلدات الأشخاص بالوجوه"), help) {
             self.set_option(|o| o.sort_by_faces = by_faces);
         }
         ui.add_space(8.0);
         let mut rename = self.options.rename_files;
         let help = if detailed {
-            "Removes codes like [AUD-…] and (1), fixes garbled text, and names files like 4749d951.mp3 from their context."
+            tr(
+                "Removes codes like [AUD-…] and (1), fixes garbled text, and names files like 4749d951.mp3 from their context.",
+                "يحذف الأكواد مثل [AUD-…] و(1)، ويصلح النص المشوّه، ويعطي الملفات مثل 4749d951.mp3 أسماء من سياقها.",
+            )
         } else {
-            "Off: files keep their original names."
+            tr("Off: files keep their original names.", "عند إيقافه تبقى الأسماء الأصلية.")
         };
-        if theme::toggle_row(ui, true, &mut rename, "Clean up file names", help) {
+        if theme::toggle_row(ui, true, &mut rename, tr("Clean up file names", "تحسين أسماء الملفات"), help) {
             self.set_option(|o| o.rename_files = rename);
         }
     }
@@ -626,41 +698,42 @@ impl ArrayApp {
         let mut keep = true;
         theme::card(ui, |ui| {
             let (icon, color) = if outcome.ok { (Icon::Check, p.success) } else { (Icon::Warning, p.danger) };
-            ui.horizontal(|ui| {
+            theme::row(ui, |ui| {
                 // دائرة خلف الأيقونة بلون النتيجة
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(40.0, 40.0), egui::Sense::hover());
                 ui.painter().circle_filled(rect.center(), 20.0, color.gamma_multiply(0.18));
                 icons::paint(ui.painter(), rect.shrink(9.0), icon, color, 0.0);
-                ui.vertical(|ui| {
-                    for (i, line) in outcome.message.lines().enumerate() {
-                        // الرمز في بداية السطر يظهر مرة واحدة في الأيقونة
-                        let line = line.trim_start_matches(['✔', '↩', '⚠', '❌']).trim_start();
-                        if i == 0 {
-                            ui.label(theme::strong(rtl::for_display(line), 16.0));
-                            if outcome.folder.exists() {
-                                ui.label(theme::muted(rtl::for_display(&outcome.folder.display().to_string())).small());
-                            }
-                        } else {
-                            theme::icon_text(ui, Icon::Warning, RichText::new(rtl::for_display(line)).color(p.amber), p.amber);
-                        }
-                    }
-                });
+                let first = outcome.message.lines().next().unwrap_or_default();
+                // الرمز في بداية السطر يظهر مرة واحدة في الأيقونة
+                let first = first.trim_start_matches(['✔', '↩', '⚠', '❌']).trim_start();
+                theme::para(ui, first, 16.0, p.text, true);
             });
+            if outcome.folder.exists() {
+                ui.label(theme::muted(rtl::for_display(&outcome.folder.display().to_string())).small());
+            }
+            for line in outcome.message.lines().skip(1) {
+                let line = line.trim_start_matches(['✔', '↩', '⚠', '❌']).trim_start();
+                theme::row(ui, |ui| {
+                    icons::show(ui, Icon::Warning, 16.0, p.amber);
+                    theme::para(ui, line, 15.0, p.amber, false);
+                });
+            }
             ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if outcome.folder.exists() && theme::button(ui, Kind::Secondary, Some(Icon::External), "Open folder", true).clicked() {
+            theme::row(ui, |ui| {
+                if outcome.folder.exists() && theme::button(ui, Kind::Secondary, Some(Icon::External), tr("Open folder", "فتح المجلد"), true).clicked() {
                     self.open_in_explorer(&outcome.folder.clone());
                 }
                 if let Some(n) = self.undo_count {
-                    if theme::button(ui, Kind::Secondary, Some(Icon::Undo), &format!("Undo ({})", files(n)), true).clicked() {
+                    let label = format!("{} ({})", tr("Undo", "تراجع"), count(n, Noun::File));
+                    if theme::button(ui, Kind::Secondary, Some(Icon::Undo), &label, true).clicked() {
                         self.confirm_undo = true;
                     }
                 }
-                if theme::button(ui, Kind::Ghost, Some(Icon::Folder), "Organize another folder", true).clicked() {
+                if theme::button(ui, Kind::Ghost, Some(Icon::Folder), tr("Organize another folder", "رتّب مجلداً آخر"), true).clicked() {
                     self.selected_path = None;
                     keep = false;
                 }
-                if theme::button(ui, Kind::Ghost, Some(Icon::Close), "Close", true).clicked() {
+                if theme::button(ui, Kind::Ghost, Some(Icon::Close), tr("Close", "إغلاق"), true).clicked() {
                     keep = false;
                 }
             });
@@ -674,30 +747,40 @@ impl ArrayApp {
             Some(Job::Planning(_, progress)) if progress.total.load(Ordering::Relaxed) > 0 => {
                 let (done, total) = (progress.done.load(Ordering::Relaxed), progress.total.load(Ordering::Relaxed));
                 let stage = progress.stage.lock().unwrap().clone();
-                ui.horizontal(|ui| {
+                theme::row(ui, |ui| {
                     icons::spinner(ui, 22.0, p.accent);
-                    ui.label(theme::strong(&stage, 17.0));
+                    ui.label(theme::strong(theme::show(&stage), 17.0));
                 });
                 ui.add_space(8.0);
-                ui.add(egui::ProgressBar::new(done as f32 / total as f32).text(format!("{} / {} photos", done, total)).fill(p.primary));
+                ui.add(egui::ProgressBar::new(done as f32 / total as f32).text(format!("{} / {}", done, total)).fill(p.primary));
                 ui.add_space(4.0);
-                theme::icon_text(ui, Icon::Person, theme::muted("The first time takes a few minutes; faces are remembered for next time.").small(), p.muted);
+                theme::row(ui, |ui| {
+                    icons::show(ui, Icon::Person, 16.0, p.muted);
+                    theme::para(
+                        ui,
+                        tr("The first time takes a few minutes; faces are remembered for next time.", "المرة الأولى تستغرق دقائق، ثم تُحفظ الوجوه للمرات القادمة."),
+                        13.0,
+                        p.muted,
+                        false,
+                    );
+                });
             }
             Some(Job::Planning(..)) => {
-                ui.horizontal(|ui| {
+                theme::row(ui, |ui| {
                     icons::spinner(ui, 22.0, p.accent);
-                    ui.label(theme::strong("Scanning files…", 17.0));
+                    ui.label(theme::strong(t("Scanning files…", "جارٍ فحص الملفات…"), 17.0));
                 });
             }
-            Some(Job::Moving { label, progress, total, .. }) => {
+            Some(Job::Moving { restoring, progress, total, .. }) => {
                 let done = progress.load(Ordering::Relaxed);
                 let fraction = if *total == 0 { 1.0 } else { done as f32 / *total as f32 };
-                ui.horizontal(|ui| {
+                let label = if *restoring { t("Restoring…", "جارٍ الإرجاع…") } else { t("Organizing…", "جارٍ الترتيب…") };
+                theme::row(ui, |ui| {
                     icons::spinner(ui, 22.0, p.accent);
-                    ui.label(theme::strong(format!("{}…", label), 17.0));
+                    ui.label(theme::strong(label, 17.0));
                 });
                 ui.add_space(8.0);
-                ui.add(egui::ProgressBar::new(fraction).text(format!("{} / {} files", done, total)).fill(p.primary));
+                ui.add(egui::ProgressBar::new(fraction).text(format!("{} / {}", done, total)).fill(p.primary));
             }
             None => {}
         });
@@ -707,67 +790,92 @@ impl ArrayApp {
         let Some(preview) = &self.preview else { return };
         let p = pal();
         let mut decision: Option<bool> = None;
+        let mut toggle_skipped = false;
         let plan = &preview.plan;
 
-        Self::page_header(ui, "Review the changes", "Nothing has moved yet. Check the list, then organize — you can undo it later.");
+        Self::page_header(
+            ui,
+            tr("Review the changes", "راجع التغييرات"),
+            tr(
+                "Nothing has moved yet. Check the list, then organize — you can undo it later.",
+                "لم يتحرك أي ملف بعد. راجع القائمة ثم رتّب — ويمكنك التراجع لاحقاً.",
+            ),
+        );
 
         // الأرقام الأساسية
-        ui.horizontal(|ui| {
+        theme::row(ui, |ui| {
             // عرض كل مربع = (المتاح - الهوامش والحدود 4×30 - المسافات 3×10) ÷ 4
             let width = ((ui.available_width() - 4.0 * 30.0 - 3.0 * 10.0) / 4.0).max(100.0);
-            theme::stat(ui, width, Icon::ArrowRight, plan.moves.len(), "to move or rename", p.accent);
-            theme::stat(ui, width, Icon::Check, plan.kept_in_folders + plan.in_place, "stay where they are", p.text);
-            theme::stat(ui, width, Icon::Person, plan.face_matches.len(), "matched by face", p.amber);
-            theme::stat(ui, width, Icon::Shield, plan.skipped.len(), "protected folders", p.success);
+            theme::stat(ui, width, Icon::ArrowRight, plan.moves.len(), tr("to move or rename", "للنقل أو إعادة التسمية"), p.accent);
+            theme::stat(ui, width, Icon::Check, plan.kept_in_folders + plan.in_place, tr("stay where they are", "تبقى في مكانها"), p.text);
+            theme::stat(ui, width, Icon::Person, plan.face_matches.len(), tr("matched by face", "عُرفت بالوجه"), p.amber);
+            theme::stat(ui, width, Icon::Shield, plan.skipped.len(), tr("protected folders", "مجلدات محمية"), p.success);
         });
         ui.add_space(12.0);
 
         // إلى أين تذهب الملفات
-        ui.horizontal_wrapped(|ui| {
+        let wrap_layout = if ar() {
+            egui::Layout::right_to_left(egui::Align::Min).with_main_wrap(true)
+        } else {
+            egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true)
+        };
+        ui.with_layout(wrap_layout, |ui| {
             for (folder, n, existing, artists) in &preview.destinations {
-                let label = if folder == THIS_FOLDER {
-                    format!("{}  ·  {}", THIS_FOLDER, n)
-                } else if *artists > 0 {
-                    format!("{}  ·  {}  ·  {} folder{} inside", folder, n, artists, if *artists == 1 { "" } else { "s" })
-                } else {
-                    format!("{}  ·  {}{}", folder, n, if *existing { "" } else { "  ·  new" })
-                };
-                theme::chip(ui, category_icon(folder), &rtl::for_display(&label));
+                let name = if folder == THIS_FOLDER { tr("This folder", "هذا المجلد").to_string() } else { folder.clone() };
+                // الاسم معزول حتى لا يلتصق به الرقم بعده فيُقرأ اسم إنجليزي مع أرقامه بالمقلوب في العربية
+                let mut label = format!("\u{2068}{name}\u{2069}  ·  {n}");
+                if *artists > 0 {
+                    label.push_str(&format!("  ·  {} {}", count(*artists, Noun::Folder), tr("inside", "بالداخل")));
+                } else if !existing {
+                    label.push_str(&format!("  ·  {}", tr("new", "جديد")));
+                }
+                let shown = if ar() { rtl::rtl_line(&label) } else { rtl::for_display(&label.replace(['\u{2068}', '\u{2069}'], "")) };
+                theme::chip(ui, category_icon(folder), &shown);
             }
         });
         ui.add_space(4.0);
         if !plan.people.is_empty() {
-            theme::icon_text(ui, Icon::Person, theme::muted(rtl::for_display(&format!("People learned from your folders: {}", plan.people.join(", ")))), p.muted);
+            let line = format!("{} {}", tr("People learned from your folders:", "الأشخاص الذين تعلّم البرنامج وجوههم:"), plan.people.join(tr(", ", "، ")));
+            theme::icon_text(ui, Icon::Person, theme::muted(theme::show(&line)), p.muted);
         }
         if let Some(note) = &plan.face_note {
-            theme::icon_text(ui, Icon::About, theme::muted(note.as_str()).small(), p.muted);
+            theme::icon_text(ui, Icon::About, theme::muted(theme::show(note)).small(), p.muted);
         }
         if !preview.skipped.is_empty() {
-            egui::CollapsingHeader::new(RichText::new(format!("{} will not be touched", folders(preview.skipped.len()))).color(p.success))
-                .id_source("skipped_folders")
-                .icon(|ui, openness, response| {
-                    let rect = egui::Rect::from_center_size(response.rect.center(), egui::vec2(16.0, 16.0));
-                    icons::paint(ui.painter(), rect, Icon::Shield, pal().success.gamma_multiply(0.6 + 0.4 * openness), 0.0);
-                })
-                .show(ui, |ui| {
-                    egui::ScrollArea::vertical().id_source("skipped_list").max_height(90.0).show(ui, |ui| {
+            let label = if ar() {
+                format!("{} لن يُلمس", count(preview.skipped.len(), Noun::ProtectedFolder))
+            } else {
+                format!("{} will not be touched", count(preview.skipped.len(), Noun::ProtectedFolder))
+            };
+            let response = theme::row(ui, |ui| {
+                icons::show(ui, Icon::Shield, 16.0, p.success);
+                ui.add(egui::Label::new(RichText::new(theme::show(&label)).color(p.success)).sense(egui::Sense::click()))
+            })
+            .inner;
+            if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                toggle_skipped = true;
+            }
+            if self.show_skipped {
+                egui::ScrollArea::vertical().id_source("skipped_list").max_height(90.0).show(ui, |ui| {
+                    theme::column(ui, |ui| {
                         for line in &preview.skipped {
-                            ui.label(RichText::new(line).small());
+                            ui.label(RichText::new(rtl::for_display(line)).small());
                         }
                     });
                 });
+            }
         }
         ui.add_space(10.0);
 
         // الجدول
         let row_height = ui.text_style_height(&egui::TextStyle::Body) + 12.0;
-        let table_height = (ui.available_height() - 70.0).max(row_height * 4.0);
+        let table_height = (ui.available_height() - 100.0).max(row_height * 4.0);
         theme::card(ui, |ui| {
             let column = ((ui.available_width() - 100.0) / 2.0).max(60.0);
-            ui.horizontal(|ui| {
-                table_cell(ui, column, 20.0, theme::muted("CURRENT LOCATION").small());
+            theme::row(ui, |ui| {
+                table_cell(ui, column, 20.0, &t("CURRENT LOCATION", "المكان الحالي"), p.muted, true);
                 ui.add_space(20.0);
-                table_cell(ui, column, 20.0, theme::muted("NEW LOCATION").small());
+                table_cell(ui, column, 20.0, &t("NEW LOCATION", "المكان الجديد"), p.muted, true);
             });
             ui.add(egui::Separator::default().spacing(10.0));
             egui::ScrollArea::vertical()
@@ -775,30 +883,38 @@ impl ArrayApp {
                 .auto_shrink([false, false])
                 .show_rows(ui, row_height, preview.rows.len(), |ui, range| {
                     let start = range.start;
-                    for (i, (from, to)) in preview.rows[range].iter().enumerate() {
+                    for (i, (from, to, face)) in preview.rows[range].iter().enumerate() {
                         let rect = ui.available_rect_before_wrap();
                         if (start + i) % 2 == 1 {
                             ui.painter().rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), row_height)), 6.0, p.stripe);
                         }
-                        ui.horizontal(|ui| {
-                            table_cell(ui, column, row_height, theme::muted(from.as_str()));
+                        let to = match face {
+                            Some(score) => format!("{}   ·  {} {:.0}%", to, tr("face", "وجه"), score * 100.0),
+                            None => to.clone(),
+                        };
+                        theme::row(ui, |ui| {
+                            table_cell(ui, column, row_height, from, p.muted, false);
                             icons::show(ui, Icon::ArrowRight, 16.0, p.accent);
-                            table_cell(ui, column, row_height, RichText::new(to.as_str()));
+                            table_cell(ui, column, row_height, &to, p.text, false);
                         });
                     }
                 });
         });
         ui.add_space(12.0);
 
-        ui.horizontal(|ui| {
-            if theme::button(ui, Kind::Primary, Some(Icon::Check), &format!("Organize {}", files(preview.rows.len())), true).clicked() {
+        theme::row(ui, |ui| {
+            let label = format!("{} {}", tr("Organize", "رتّب"), count(preview.rows.len(), Noun::File));
+            if theme::button(ui, Kind::Primary, Some(Icon::Check), &label, true).clicked() {
                 decision = Some(true);
             }
-            if theme::button(ui, Kind::Secondary, Some(Icon::Close), "Cancel", true).clicked() {
+            if theme::button(ui, Kind::Secondary, Some(Icon::Close), tr("Cancel", "إلغاء"), true).clicked() {
                 decision = Some(false);
             }
         });
 
+        if toggle_skipped {
+            self.show_skipped = !self.show_skipped;
+        }
         match decision {
             Some(true) => {
                 if let Some(preview) = self.preview.take() {
@@ -807,7 +923,7 @@ impl ArrayApp {
             }
             Some(false) => {
                 self.preview = None;
-                self.status_message = "Cancelled. No files were moved.".to_string();
+                self.status_message = tr("Cancelled. No files were moved.", "أُلغي. لم يُنقل أي ملف.").to_string();
             }
             None => {}
         }
@@ -815,11 +931,11 @@ impl ArrayApp {
 
     fn history_page(&mut self, ui: &mut egui::Ui) {
         let p = pal();
-        Self::page_header(ui, "History", "Undo the last organize and put every file back where it was.");
+        Self::page_header(ui, tr("History", "السجل"), tr("Undo the last organize and put every file back where it was.", "تراجع عن آخر ترتيب وأعِد كل ملف إلى مكانه."));
         let last = self.undo_source.clone().zip(self.undo_count);
         theme::card(ui, |ui| match last {
-            Some((source, count)) => {
-                theme::section_title(ui, Icon::History, "Last organize");
+            Some((source, n)) => {
+                theme::section_title(ui, Icon::History, &t("Last organize", "آخر ترتيب"));
                 ui.add_space(8.0);
                 theme::icon_text(ui, Icon::Folder, theme::strong(rtl::for_display(&folder_name(&source)), 15.0), p.muted);
                 ui.label(theme::muted(rtl::for_display(&source.display().to_string())).small());
@@ -827,25 +943,29 @@ impl ArrayApp {
                     let local: DateTime<Local> = when.into();
                     theme::icon_text(ui, Icon::Clock, theme::muted(local.format("%Y-%m-%d  %H:%M").to_string()), p.muted);
                 }
-                theme::icon_text(ui, Icon::Undo, theme::muted(format!("{} can be moved back", files(count))), p.muted);
+                let back = if ar() { format!("يمكن إرجاع {}", count(n, Noun::File)) } else { format!("{} can be moved back", count(n, Noun::File)) };
+                theme::icon_text(ui, Icon::Undo, theme::muted(theme::show(&back)), p.muted);
                 ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    if theme::button(ui, Kind::Primary, Some(Icon::Undo), "Undo last organize", true).clicked() {
+                theme::row(ui, |ui| {
+                    if theme::button(ui, Kind::Primary, Some(Icon::Undo), tr("Undo last organize", "تراجع عن آخر ترتيب"), true).clicked() {
                         self.confirm_undo = true;
                     }
-                    if theme::button(ui, Kind::Secondary, Some(Icon::External), "Open folder", true).clicked() {
+                    if theme::button(ui, Kind::Secondary, Some(Icon::External), tr("Open folder", "فتح المجلد"), true).clicked() {
                         self.open_in_explorer(&source);
                     }
                 });
                 ui.add_space(6.0);
-                ui.label(theme::muted("Files you changed or replaced since then are left alone.").small());
+                theme::para(ui, tr("Files you changed or replaced since then are left alone.", "الملفات التي غيّرتها أو استبدلتها بعد ذلك تبقى كما هي."), 13.0, p.muted, false);
             }
             None => {
                 ui.vertical_centered(|ui| {
                     ui.add_space(10.0);
                     icons::show(ui, Icon::History, 40.0, p.muted);
-                    ui.label(theme::strong("Nothing to undo", 17.0));
-                    ui.label(theme::muted("After you organize a folder, you can put everything back from here."));
+                    ui.label(theme::strong(t("Nothing to undo", "لا يوجد ما يُتراجع عنه"), 17.0));
+                    ui.label(theme::muted(t(
+                        "After you organize a folder, you can put everything back from here.",
+                        "بعد ترتيب أي مجلد، يمكنك إعادة كل شيء من هنا.",
+                    )));
                     ui.add_space(10.0);
                 });
             }
@@ -853,64 +973,92 @@ impl ArrayApp {
     }
 
     fn settings_page(&mut self, ui: &mut egui::Ui) {
-        Self::page_header(ui, "Settings", "Saved automatically and used from the next preview.");
+        Self::page_header(ui, tr("Settings", "الإعدادات"), tr("Saved automatically and used from the next preview.", "تُحفظ تلقائياً وتُستخدم من المعاينة التالية."));
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            theme::card(ui, |ui| {
-                theme::section_title(ui, Icon::Settings, "Appearance");
-                ui.add_space(8.0);
-                let mut selected = match self.options.appearance.as_str() {
-                    "light" => 1,
-                    "dark" => 2,
-                    _ => 0,
-                };
-                if theme::segmented(ui, &["System", "Light", "Dark"], &mut selected) {
-                    let value = ["system", "light", "dark"][selected].to_string();
-                    self.set_option(move |o| o.appearance = value.clone());
-                }
-            });
-            ui.add_space(14.0);
-
-            theme::card(ui, |ui| {
-                theme::section_title(ui, Icon::Organize, "Organizing");
-                ui.add_space(8.0);
-                self.option_toggles(ui, false);
-            });
-            ui.add_space(14.0);
-
-            theme::card(ui, |ui| {
-                theme::section_title(ui, Icon::Music, "Music grouping");
-                ui.label(theme::muted("Words that mark a speaker in a file name, and names of AI music tools."));
-                ui.add_space(8.0);
-                ui.label(RichText::new(rtl::for_display(&format!("Speaker words:  {}", self.options.speaker_keywords.join("، ")))).small());
-                ui.label(RichText::new(rtl::for_display(&format!("AI tools:  {}", self.options.ai_markers.join(", ")))).small());
-                ui.add_space(8.0);
-                if theme::button(ui, Kind::Secondary, Some(Icon::Edit), "Edit lists in Notepad", true).clicked() {
-                    self.open_settings_file();
-                }
-            });
-            ui.add_space(14.0);
-
-            theme::card(ui, |ui| {
-                theme::section_title(ui, Icon::Lock, "Data on this PC");
-                ui.label(theme::muted(rtl::for_display(&format!("Settings, the undo record and face memory are kept in {}", self.storage.dir().display()))).small());
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if theme::button(ui, Kind::Secondary, Some(Icon::External), "Open data folder", true).clicked() {
-                        let dir = self.storage.dir().to_path_buf();
-                        let _ = std::fs::create_dir_all(&dir);
-                        self.open_in_explorer(&dir);
+            theme::column(ui, |ui| {
+                theme::card(ui, |ui| {
+                    theme::section_title(ui, Icon::About, &t("Language", "اللغة"));
+                    ui.add_space(8.0);
+                    let mut selected = if ar() { 0 } else { 1 };
+                    if theme::segmented(ui, &["العربية", "English"], &mut selected) {
+                        self.set_language(selected == 0);
                     }
-                    let size = self.storage.face_cache_size();
-                    let label = format!("Clear face memory ({:.1} MB)", size as f64 / 1_048_576.0);
-                    if theme::button(ui, Kind::Ghost, Some(Icon::Trash), &label, size > 0).clicked() {
-                        self.confirm_clear_faces = true;
+                });
+                ui.add_space(14.0);
+
+                theme::card(ui, |ui| {
+                    theme::section_title(ui, Icon::Settings, &t("Appearance", "المظهر"));
+                    ui.add_space(8.0);
+                    let mut selected = match self.options.appearance.as_str() {
+                        "light" => 1,
+                        "dark" => 2,
+                        _ => 0,
+                    };
+                    let names = [tr("System", "حسب النظام"), tr("Light", "فاتح"), tr("Dark", "داكن")];
+                    if theme::segmented(ui, &names, &mut selected) {
+                        let value = ["system", "light", "dark"][selected].to_string();
+                        self.set_option(move |o| o.appearance = value.clone());
                     }
+                });
+                ui.add_space(14.0);
+
+                theme::card(ui, |ui| {
+                    theme::section_title(ui, Icon::Organize, &t("Organizing", "الترتيب"));
+                    ui.add_space(8.0);
+                    self.option_toggles(ui, false);
+                });
+                ui.add_space(14.0);
+
+                theme::card(ui, |ui| {
+                    theme::section_title(ui, Icon::Music, &t("Music grouping", "تجميع الموسيقى"));
+                    theme::para(
+                        ui,
+                        tr("Words that mark a speaker in a file name, and names of AI music tools.", "كلمات تدل على صاحب المقطع في اسم الملف، وأسماء أدوات صنع الموسيقى بالذكاء الاصطناعي."),
+                        15.0,
+                        pal().muted,
+                        false,
+                    );
+                    ui.add_space(8.0);
+                    let speakers = format!("{}  {}", tr("Speaker words:", "كلمات أصحاب المقاطع:"), self.options.speaker_keywords.join("، "));
+                    let ai_tools = format!("{}  {}", tr("AI tools:", "أدوات الذكاء الاصطناعي:"), self.options.ai_markers.join(", "));
+                    ui.label(RichText::new(theme::show(&speakers)).small());
+                    ui.label(RichText::new(theme::show(&ai_tools)).small());
+                    ui.add_space(8.0);
+                    if theme::button(ui, Kind::Secondary, Some(Icon::Edit), tr("Edit lists in Notepad", "تعديل القوائم في Notepad"), true).clicked() {
+                        self.open_settings_file();
+                    }
+                });
+                ui.add_space(14.0);
+
+                theme::card(ui, |ui| {
+                    theme::section_title(ui, Icon::Lock, &t("Data on this PC", "البيانات على جهازك"));
+                    theme::para(
+                        ui,
+                        tr("Settings, the undo record and face memory are kept in:", "الإعدادات وسجل التراجع وذاكرة الوجوه محفوظة في:"),
+                        13.0,
+                        pal().muted,
+                        false,
+                    );
+                    ui.label(theme::muted(self.storage.dir().display().to_string()).small());
+                    ui.add_space(8.0);
+                    theme::row(ui, |ui| {
+                        if theme::button(ui, Kind::Secondary, Some(Icon::External), tr("Open data folder", "فتح مجلد البيانات"), true).clicked() {
+                            let dir = self.storage.dir().to_path_buf();
+                            let _ = std::fs::create_dir_all(&dir);
+                            self.open_in_explorer(&dir);
+                        }
+                        let size = self.storage.face_cache_size();
+                        let label = format!("{} ({:.1} MB)", tr("Clear face memory", "مسح ذاكرة الوجوه"), size as f64 / 1_048_576.0);
+                        if theme::button(ui, Kind::Ghost, Some(Icon::Trash), &label, size > 0).clicked() {
+                            self.confirm_clear_faces = true;
+                        }
+                    });
                 });
             });
         });
     }
 
-    fn about_page(&self, ui: &mut egui::Ui) {
+    fn about_page(&mut self, ui: &mut egui::Ui) {
         let p = pal();
         ui.add_space(30.0);
         ui.vertical_centered(|ui| {
@@ -919,70 +1067,185 @@ impl ArrayApp {
             }
             ui.add_space(6.0);
             ui.label(theme::strong("Array", 32.0));
-            ui.label(theme::muted(format!("Version {}", VERSION)));
+            ui.label(theme::muted(t(&format!("Version {}", VERSION), &format!("الإصدار {}", VERSION))));
             ui.add_space(14.0);
-            ui.label("Gathers scattered files and puts them in tidy folders —");
-            ui.label("photos into each person's folder, recitations and songs into each artist's folder —");
-            ui.label("without touching what you already organized.");
+            for (en, arabic) in [
+                ("Gathers scattered files and puts them in tidy folders —", "يجمع الملفات المبعثرة ويضعها في مجلدات مرتبة —"),
+                ("photos into each person's folder, recitations and songs into each artist's folder —", "الصور في مجلد كل شخص، والتلاوات والأغاني في مجلد كل قارئ وفنان —"),
+                ("without touching what you already organized.", "دون أن يمس ما رتّبته أنت."),
+            ] {
+                ui.label(t(en, arabic));
+            }
             ui.add_space(18.0);
             // سطر بأيقونة في المنتصف: عرضه يُحسب ثم تُترك مسافة مساوية على الجانبين
-            let note = "Everything runs on this computer. Nothing is uploaded.";
-            let width = ui.painter().layout_no_wrap(note.to_owned(), egui::FontId::proportional(15.0), p.success).size().x + 26.0;
+            let note = t("Everything runs on this computer. Nothing is uploaded.", "كل شيء يعمل على هذا الجهاز. لا يُرفع أي شيء.");
+            let width = ui.painter().layout_no_wrap(note.clone(), egui::FontId::proportional(15.0), p.success).size().x + 26.0;
             ui.horizontal(|ui| {
                 ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
-                icons::show(ui, Icon::Lock, 16.0, p.success);
-                ui.label(RichText::new(note).color(p.success));
+                if ar() {
+                    ui.label(RichText::new(note.clone()).color(p.success));
+                    icons::show(ui, Icon::Lock, 16.0, p.success);
+                } else {
+                    icons::show(ui, Icon::Lock, 16.0, p.success);
+                    ui.label(RichText::new(note.clone()).color(p.success));
+                }
             });
-            ui.add_space(18.0);
-            ui.label(theme::muted("Face models: YuNet (MIT) and SFace (Apache 2.0) from OpenCV Zoo").small());
+            ui.add_space(14.0);
+            if theme::button(ui, Kind::Ghost, Some(Icon::About), tr("Show the welcome screen", "عرض شاشة الترحيب"), true).clicked() {
+                self.set_option(|o| o.welcome_seen = false);
+            }
+            ui.add_space(14.0);
+            ui.label(theme::muted(t("Face models: YuNet (MIT) and SFace (Apache 2.0) from OpenCV Zoo", "نماذج الوجوه: YuNet (MIT) وSFace (Apache 2.0) من OpenCV Zoo")).small());
         });
     }
 
-    fn dialogs(&mut self, ctx: &egui::Context) {
+    /// شاشة الترحيب في أول تشغيل: اختيار اللغة والخطوات الثلاث
+    fn welcome_screen(&mut self, ui: &mut egui::Ui) {
         let p = pal();
-        if self.confirm_undo {
-            let count = self.undo_count.unwrap_or(0);
-            egui::Window::new(theme::strong("Undo last organize", 17.0))
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    ui.label(format!("Move {} back to where they were before the last organize?", files(count)));
-                    ui.label(theme::muted("Files that were changed or replaced since then are left alone.").small());
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        if theme::button(ui, Kind::Primary, Some(Icon::Undo), "Yes, undo", true).clicked() {
-                            self.confirm_undo = false;
-                            self.start_undo(ctx);
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(24.0);
+                if let Some(logo) = &self.logo {
+                    ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(logo.id(), [96.0, 96.0])));
+                }
+                ui.add_space(8.0);
+                ui.label(theme::strong(t("Welcome to Array", "أهلاً بك في Array"), 30.0));
+                ui.label(theme::muted(t(
+                    "Tidy up scattered files in three steps — safely, on this PC.",
+                    "رتّب ملفاتك المبعثرة في ثلاث خطوات — بأمان وعلى جهازك.",
+                )));
+                ui.add_space(14.0);
+                let mut selected = if ar() { 0 } else { 1 };
+                if theme::segmented(ui, &["العربية", "English"], &mut selected) {
+                    self.set_language(selected == 0);
+                }
+                ui.add_space(22.0);
+            });
+
+            // البطاقات الثلاث متجاورة، والأولى عند بداية السطر
+            let steps = [
+                (Icon::Folder, "1", tr("Choose a folder", "اختر مجلداً"), tr("Pick it with Browse or drag it onto the window.", "اختره بزر الاستعراض أو اسحبه إلى النافذة.")),
+                (
+                    Icon::Search,
+                    "2",
+                    tr("Review the preview", "راجع المعاينة"),
+                    tr("See where every file will go. Nothing moves yet.", "ترى أين سيذهب كل ملف. لا يتحرك شيء بعد."),
+                ),
+                (
+                    Icon::Check,
+                    "3",
+                    tr("Organize — and undo anytime", "رتّب — وتراجع متى شئت"),
+                    tr("Confirm to organize. The History page puts everything back.", "أكّد للترتيب. وصفحة السجل تعيد كل شيء كما كان."),
+                ),
+            ];
+            let gap = 16.0;
+            let card_width = ((ui.available_width().min(980.0) - 2.0 * gap) / 3.0 - 42.0).max(180.0);
+            let total = 3.0 * (card_width + 42.0) + 2.0 * gap;
+            theme::row(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
+                for (icon, number, title, body) in steps {
+                    egui::Frame::none()
+                        .fill(p.surface)
+                        .stroke(egui::Stroke::new(1.0_f32, p.border))
+                        .rounding(14.0)
+                        .inner_margin(egui::Margin::same(20.0))
+                        .show(ui, |ui| {
+                            ui.set_width(card_width);
+                            ui.set_min_height(150.0);
+                            theme::column(ui, |ui| {
+                                theme::row(ui, |ui| {
+                                    let (rect, _) = ui.allocate_exact_size(egui::vec2(40.0, 40.0), egui::Sense::hover());
+                                    ui.painter().circle_filled(rect.center(), 20.0, p.selected);
+                                    icons::paint(ui.painter(), rect.shrink(10.0), icon, p.accent, 0.0);
+                                    ui.label(theme::strong(number, 22.0).color(p.accent));
+                                });
+                                ui.add_space(6.0);
+                                ui.label(theme::strong(theme::show(title), 16.0));
+                                theme::para(ui, body, 14.0, p.muted, false);
+                            });
+                        });
+                }
+            });
+
+            ui.add_space(22.0);
+            ui.vertical_centered(|ui| {
+                let note = t(
+                    "Your existing folders stay as they are, and everything runs offline.",
+                    "مجلداتك الحالية تبقى كما هي، وكل شيء يعمل دون إنترنت.",
+                );
+                ui.label(theme::muted(note));
+                ui.add_space(14.0);
+                if theme::button(ui, Kind::Primary, Some(Icon::ArrowRight), tr("Get started", "ابدأ"), true).clicked() {
+                    self.set_option(|o| o.welcome_seen = true);
+                    self.page = Page::Organize;
+                }
+                ui.add_space(20.0);
+            });
+        });
+    }
+
+    fn dialog(&mut self, ctx: &egui::Context, id: &str, title: &str, body: &str, note: &str) -> Option<bool> {
+        let p = pal();
+        let mut answer = None;
+        egui::Window::new(id)
+            .title_bar(false)
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size([440.0, 0.0])
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                theme::column(ui, |ui| {
+                    ui.label(theme::strong(theme::show(title), 18.0));
+                    ui.add_space(6.0);
+                    theme::para(ui, body, 15.0, p.text, false);
+                    theme::para(ui, note, 13.0, p.muted, false);
+                    ui.add_space(12.0);
+                    theme::row(ui, |ui| {
+                        if theme::button(ui, Kind::Primary, None, title, true).clicked() {
+                            answer = Some(true);
                         }
-                        if theme::button(ui, Kind::Secondary, None, "Cancel", true).clicked() {
-                            self.confirm_undo = false;
+                        if theme::button(ui, Kind::Secondary, None, tr("Cancel", "إلغاء"), true).clicked() {
+                            answer = Some(false);
                         }
                     });
                 });
+            });
+        answer
+    }
+
+    fn dialogs(&mut self, ctx: &egui::Context) {
+        if self.confirm_undo {
+            let n = count(self.undo_count.unwrap_or(0), Noun::File);
+            let body = if ar() {
+                format!("هل تريد إعادة {} إلى أماكنها قبل آخر ترتيب؟", n)
+            } else {
+                format!("Move {} back to where they were before the last organize?", n)
+            };
+            let note = tr("Files that were changed or replaced since then are left alone.", "الملفات التي تغيّرت أو استُبدلت بعد ذلك تبقى كما هي.");
+            match self.dialog(ctx, "undo", tr("Undo last organize", "تراجع عن آخر ترتيب"), &body, note) {
+                Some(true) => {
+                    self.confirm_undo = false;
+                    self.start_undo(ctx);
+                }
+                Some(false) => self.confirm_undo = false,
+                None => {}
+            }
         }
         if self.confirm_clear_faces {
-            egui::Window::new(theme::strong("Clear face memory", 17.0))
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    ui.label("Photos will be analyzed again next time (a few minutes).");
-                    ui.label(RichText::new("Your photos are not affected.").small().color(p.muted));
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        if theme::button(ui, Kind::Primary, Some(Icon::Trash), "Clear", true).clicked() {
-                            self.confirm_clear_faces = false;
-                            self.status_message = match self.storage.clear_face_cache() {
-                                Ok(()) => "Face memory cleared.".to_string(),
-                                Err(err) => format!("⚠ {}", err),
-                            };
-                        }
-                        if theme::button(ui, Kind::Secondary, None, "Cancel", true).clicked() {
-                            self.confirm_clear_faces = false;
-                        }
-                    });
-                });
+            let body = tr("Photos will be analyzed again next time (a few minutes).", "ستُحلَّل الصور من جديد في المرة القادمة (بضع دقائق).");
+            let note = tr("Your photos are not affected.", "صورك لا تتأثر.");
+            match self.dialog(ctx, "faces", tr("Clear face memory", "مسح ذاكرة الوجوه"), body, note) {
+                Some(true) => {
+                    self.confirm_clear_faces = false;
+                    self.status_message = match self.storage.clear_face_cache() {
+                        Ok(()) => tr("Face memory cleared.", "مُسحت ذاكرة الوجوه.").to_string(),
+                        Err(err) => format!("⚠ {}", err),
+                    };
+                }
+                Some(false) => self.confirm_clear_faces = false,
+                None => {}
+            }
         }
     }
 }
@@ -1011,20 +1274,36 @@ fn folder_name(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.display().to_string())
 }
 
-fn files(n: usize) -> String {
-    if n == 1 { "1 file".to_string() } else { format!("{} files", n) }
-}
-
-fn folders(n: usize) -> String {
-    if n == 1 { "1 program or project folder".to_string() } else { format!("{} program or project folders", n) }
-}
-
-/// خلية بعرض ثابت؛ الاسم الطويل يُختصر ويظهر كاملاً عند المرور عليه
-fn table_cell(ui: &mut egui::Ui, width: f32, height: f32, text: RichText) {
-    ui.allocate_ui_with_layout(egui::vec2(width, height), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+/// خلية بعرض ثابت. النص بترتيبه المنطقي؛ إن كان أطول من الخلية يُقص من نهايته المنطقية
+/// ثم يُجهّز للعرض، فتظهر "…" في الجهة الصحيحة لكل لغة. ready = النص جاهز للرسم أصلاً
+fn table_cell(ui: &mut egui::Ui, width: f32, height: f32, text: &str, color: egui::Color32, ready: bool) {
+    let font = egui::FontId::proportional(if ready { 13.0 } else { 15.0 });
+    let display = |s: &str| if ready { s.to_string() } else { rtl::for_display(s) };
+    let measure = |s: &str| ui.fonts(|f| f.layout_no_wrap(s.to_string(), font.clone(), color).size().x);
+    let mut shown = display(text);
+    let mut truncated = false;
+    if !ready && measure(&shown) > width {
+        let chars: Vec<char> = text.chars().collect();
+        let (mut lo, mut hi) = (0usize, chars.len());
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2;
+            let candidate: String = chars[..mid].iter().collect::<String>() + "…";
+            if measure(&display(&candidate)) <= width {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        shown = display(&(chars[..lo].iter().collect::<String>() + "…"));
+        truncated = true;
+    }
+    let layout = if ar() { egui::Layout::right_to_left(egui::Align::Center) } else { egui::Layout::left_to_right(egui::Align::Center) };
+    ui.allocate_ui_with_layout(egui::vec2(width, height), layout, |ui| {
         ui.set_min_width(width);
-        let full = text.text().to_string();
-        ui.add(egui::Label::new(text).truncate(true)).on_hover_text(full);
+        let response = ui.add(egui::Label::new(RichText::new(shown).font(font.clone()).color(color)).wrap(false));
+        if truncated {
+            response.on_hover_text(display(text));
+        }
     });
 }
 
@@ -1046,6 +1325,14 @@ impl eframe::App for ArrayApp {
         if self.job.is_some() {
             // تحديث شريط التقدم أثناء العمل
             ctx.request_repaint_after(Duration::from_millis(100));
+        }
+
+        // شاشة الترحيب في أول تشغيل
+        if !self.options.welcome_seen {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::none().fill(p.bg).inner_margin(egui::Margin::symmetric(32.0, 24.0)))
+                .show(ctx, |ui| self.welcome_screen(ui));
+            return;
         }
 
         // سحب مجلد وإفلاته على النافذة
@@ -1072,21 +1359,23 @@ impl eframe::App for ArrayApp {
                     Some('⏳') => (Some(Icon::Clock), p.accent, &status['⏳'.len_utf8()..]),
                     _ => (None, p.muted, status),
                 };
-                ui.horizontal(|ui| {
+                theme::row(ui, |ui| {
                     if let Some(icon) = icon {
                         icons::show(ui, icon, 14.0, color);
                     }
-                    ui.add(egui::Label::new(theme::muted(rtl::for_display(text.trim_start())).small()).truncate(true));
+                    ui.add(egui::Label::new(theme::muted(theme::show(text.trim_start())).small()).truncate(!ar()));
                 });
             });
 
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(p.bg).inner_margin(egui::Margin::symmetric(32.0, 24.0)))
-            .show(ctx, |ui| match self.page {
-                Page::Organize => self.organize_page(ui, ctx),
-                Page::History => self.history_page(ui),
-                Page::Settings => self.settings_page(ui),
-                Page::About => self.about_page(ui),
+            .show(ctx, |ui| {
+                theme::column(ui, |ui| match self.page {
+                    Page::Organize => self.organize_page(ui, ctx),
+                    Page::History => self.history_page(ui),
+                    Page::Settings => self.settings_page(ui),
+                    Page::About => self.about_page(ui),
+                });
             });
 
         self.dialogs(ctx);

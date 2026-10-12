@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use crate::faces::{self, FaceCache};
+use crate::i18n::tr;
 use crate::grouping::{self, Assignment, Track, DEFAULT_AI_MARKERS};
 use crate::naming;
 use crate::normalizer::{fix_mojibake, looks_garbled, normalize_arabic, sanitize_filename, to_western_digits};
@@ -47,6 +48,10 @@ pub struct Options {
     pub sort_by_faces: bool,
     /// مظهر الواجهة: "system" يتبع ويندوز، أو "light" أو "dark"
     pub appearance: String,
+    /// لغة الواجهة: "ar" (عربي، من اليمين لليسار) أو "en"
+    pub language: String,
+    /// هل عُرضت شاشة الترحيب من قبل
+    pub welcome_seen: bool,
 }
 
 impl Default for Options {
@@ -58,6 +63,8 @@ impl Default for Options {
             keep_existing_folders: true,
             sort_by_faces: true,
             appearance: "system".to_string(),
+            language: "ar".to_string(),
+            welcome_seen: false,
         }
     }
 }
@@ -279,7 +286,7 @@ impl OrganizerEngine {
 
     fn check_source(source_path: &Path) -> Result<(), String> {
         if !source_path.is_dir() {
-            return Err("The selected folder does not exist.".to_string());
+            return Err(tr("The selected folder does not exist.", "المجلد المختار غير موجود.").to_string());
         }
         SafetyChecker::check_root(source_path)
     }
@@ -584,7 +591,7 @@ impl OrganizerEngine {
 
         let cache = Mutex::new(cache_path.map(FaceCache::load).unwrap_or_default());
         let learn_total: usize = folders.iter().map(|f| f.2.len()).sum();
-        progress.start("Learning faces from your folders", learn_total);
+        progress.start(tr("Learning faces from your folders", "تعلّم الوجوه من مجلداتك"), learn_total);
         let mut people = Vec::new();
         for (name, dir, sample) in &folders {
             match faces::analyze_all(sample, &cache, &progress.done) {
@@ -593,7 +600,7 @@ impl OrganizerEngine {
                     people.extend(faces::learn_person(name, dir, &photos));
                 }
                 Err(err) => {
-                    sorting.note = Some(format!("Face sorting is off: {err}"));
+                    sorting.note = Some(format!("{} {err}", tr("Face sorting is off:", "الترتيب بالوجوه متوقف:")));
                     return sorting;
                 }
             }
@@ -602,7 +609,7 @@ impl OrganizerEngine {
         sorting.people = people.iter().map(|p| p.name.clone()).collect();
 
         if !people.is_empty() {
-            progress.start("Recognizing faces in loose photos", readable.len());
+            progress.start(tr("Recognizing faces in loose photos", "التعرّف على الوجوه في الصور المتفرقة"), readable.len());
             if let Ok(analyzed) = faces::analyze_all(&readable, &cache, &progress.done) {
                 for path in &readable {
                     if let Some(Some(found)) = analyzed.get(path) {
@@ -618,7 +625,11 @@ impl OrganizerEngine {
         }
         let unreadable = loose.len() - readable.len();
         if unreadable > 0 {
-            sorting.note = Some(format!("{} photos (HEIC/HEIF) could not be read for face sorting.", unreadable));
+            sorting.note = Some(if crate::i18n::ar() {
+                format!("تعذّرت قراءة {} (HEIC/HEIF) للترتيب بالوجوه.", crate::i18n::count(unreadable, crate::i18n::Noun::Photo))
+            } else {
+                format!("{} photos (HEIC/HEIF) could not be read for face sorting.", unreadable)
+            });
         }
         sorting
     }

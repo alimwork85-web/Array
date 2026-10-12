@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use eframe::egui::{self, Color32, FontFamily, FontId, RichText, Rounding, Stroke, TextStyle};
 
+use crate::i18n::{ar, tr};
 use crate::icons::{self, Icon};
+use crate::rtl;
 
 /// ألوان سمة واحدة. نسب التباين للنص ≥ 4.5:1 على خلفيته
 pub struct Palette {
@@ -188,7 +190,52 @@ pub fn muted(text: impl Into<String>) -> RichText {
     RichText::new(text).color(pal().muted)
 }
 
-/// بطاقة: سطح بحدود رفيعة وزوايا مستديرة
+// ---------- اللغة والاتجاه ----------
+
+/// تجهيز نص من الواجهة للرسم: في العربية تُوصل الحروف ويُرتب النص من اليمين لليسار
+pub fn show(text: &str) -> String {
+    if ar() { rtl::rtl_line(text) } else { text.to_owned() }
+}
+
+/// نص الواجهة بلغتها الحالية، جاهز للرسم
+pub fn t(en: &str, arabic: &str) -> String {
+    show(tr(en, arabic))
+}
+
+/// صف أفقي يبدأ من بداية السطر: من اليمين في العربية ومن اليسار في الإنجليزية
+pub fn row<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
+    if ar() {
+        let size = egui::vec2(ui.available_size_before_wrap().x, ui.spacing().interact_size.y);
+        ui.allocate_ui_with_layout(size, egui::Layout::right_to_left(egui::Align::Center), add)
+    } else {
+        ui.horizontal(add)
+    }
+}
+
+/// عمود محاذى لبداية السطر (اليمين في العربية)
+pub fn column<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
+    ui.with_layout(egui::Layout::top_down(if ar() { egui::Align::Max } else { egui::Align::Min }), add)
+}
+
+/// فقرة تنتقل لأسطر جديدة. في العربية يُقسم النص بترتيب القراءة ثم يُعرض كل سطر من اليمين
+pub fn para(ui: &mut egui::Ui, text: &str, size: f32, color: Color32, semibold: bool) {
+    let family = if semibold { FontFamily::Name(SEMIBOLD.into()) } else { FontFamily::Proportional };
+    let font = FontId::new(size, family);
+    if !ar() {
+        ui.add(egui::Label::new(RichText::new(text).font(font).color(color)).wrap(true));
+        return;
+    }
+    let width = ui.available_width().max(80.0);
+    let lines = rtl::wrap_lines(text, width, |line| ui.fonts(|f| f.layout_no_wrap(rtl::rtl_line(line), font.clone(), color).size().x));
+    column(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        for line in lines {
+            ui.add(egui::Label::new(RichText::new(rtl::rtl_line(&line)).font(font.clone()).color(color)).wrap(false));
+        }
+    });
+}
+
+/// بطاقة: سطح بحدود رفيعة وزوايا مستديرة، ومحتواها محاذى لبداية السطر
 pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let p = pal();
     egui::Frame::none()
@@ -198,14 +245,14 @@ pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
         .inner_margin(egui::Margin::same(20.0))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            add(ui)
+            column(ui, add).inner
         })
         .inner
 }
 
-/// عنوان خطوة: رقم في دائرة ثم نص
+/// عنوان خطوة: رقم في دائرة ثم نص (النص يُمرَّر جاهزاً للرسم)
 pub fn step_title(ui: &mut egui::Ui, number: &str, title: &str) {
-    ui.horizontal(|ui| {
+    row(ui, |ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover());
         ui.painter().circle_filled(rect.center(), 13.0, pal().primary);
         ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, number, FontId::new(14.0, FontFamily::Name(SEMIBOLD.into())), Color32::WHITE);
@@ -213,17 +260,17 @@ pub fn step_title(ui: &mut egui::Ui, number: &str, title: &str) {
     });
 }
 
-/// عنوان قسم بأيقونة
+/// عنوان قسم بأيقونة (النص يُمرَّر جاهزاً للرسم)
 pub fn section_title(ui: &mut egui::Ui, icon: Icon, title: &str) {
-    ui.horizontal(|ui| {
+    row(ui, |ui| {
         icons::show(ui, icon, 20.0, pal().accent);
         ui.label(strong(title, 17.0));
     });
 }
 
-/// نص بأيقونة صغيرة قبله
+/// نص بأيقونة صغيرة قبله (النص يُمرَّر جاهزاً للرسم)
 pub fn icon_text(ui: &mut egui::Ui, icon: Icon, text: RichText, color: Color32) -> egui::Response {
-    ui.horizontal(|ui| {
+    row(ui, |ui| {
         icons::show(ui, icon, 16.0, color);
         // النص الطويل (مثل المسارات) ينتقل لسطر جديد بدل تجاوز حافة البطاقة
         ui.add(egui::Label::new(text).wrap(true));
@@ -238,11 +285,13 @@ pub enum Kind {
     Ghost,
 }
 
-/// زر بأيقونة: حالات واضحة للمرور والضغط والتركيز بلوحة المفاتيح والتعطيل
+/// زر بأيقونة: حالات واضحة للمرور والضغط والتركيز بلوحة المفاتيح والتعطيل.
+/// text نص الواجهة كما هو (يُجهّز للعربية هنا)، والأيقونة على يمينه في العربية
 pub fn button(ui: &mut egui::Ui, kind: Kind, icon: Option<Icon>, text: &str, enabled: bool) -> egui::Response {
     let p = pal();
+    let shown = show(text);
     let font = FontId::new(15.0, if kind == Kind::Primary { FontFamily::Name(SEMIBOLD.into()) } else { FontFamily::Proportional });
-    let probe = ui.painter().layout_no_wrap(text.to_owned(), font.clone(), p.text);
+    let probe = ui.painter().layout_no_wrap(shown.clone(), font.clone(), p.text);
     let icon_space = if icon.is_some() { 26.0 } else { 0.0 };
     let height = if kind == Kind::Primary { 42.0 } else { 36.0 };
     let width = (probe.size().x + icon_space + 32.0).max(if kind == Kind::Primary { 180.0 } else { 0.0 });
@@ -264,15 +313,16 @@ pub fn button(ui: &mut egui::Ui, kind: Kind, icon: Option<Icon>, text: &str, ena
         ui.painter().rect_stroke(rect.expand(2.0), 10.0, Stroke::new(2.0_f32, p.accent));
     }
 
-    let content_width = probe.size().x + icon_space;
-    let mut x = rect.center().x - content_width / 2.0;
+    let text_width = probe.size().x;
+    let left = rect.center().x - (text_width + icon_space) / 2.0;
+    // الإنجليزية: [أيقونة] نص — العربية: نص [أيقونة]
+    let (icon_x, text_x) = if ar() { (left + text_width + 8.0 + 9.0, left) } else { (left + 9.0, left + icon_space) };
     if let Some(icon) = icon {
-        let icon_rect = egui::Rect::from_center_size(egui::pos2(x + 9.0, rect.center().y), egui::vec2(18.0, 18.0));
+        let icon_rect = egui::Rect::from_center_size(egui::pos2(icon_x, rect.center().y), egui::vec2(18.0, 18.0));
         icons::paint(ui.painter(), icon_rect, icon, fg, 0.0);
-        x += icon_space;
     }
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, fg);
-    ui.painter().galley(egui::pos2(x, rect.center().y - galley.size().y / 2.0), galley, fg);
+    let galley = ui.painter().layout_no_wrap(shown, font, fg);
+    ui.painter().galley(egui::pos2(text_x, rect.center().y - galley.size().y / 2.0), galley, fg);
 
     if enabled {
         response.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -281,18 +331,18 @@ pub fn button(ui: &mut egui::Ui, kind: Kind, icon: Option<Icon>, text: &str, ena
     }
 }
 
-/// عنصر في القائمة الجانبية
+/// عنصر في القائمة الجانبية (الشريط الدال على الصفحة الحالية عند بداية السطر)
 pub fn nav_item(ui: &mut egui::Ui, icon: Icon, text: &str, selected: bool, enabled: bool) -> egui::Response {
     let p = pal();
     let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 42.0), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
     // زر (يدعم أمر "الضغط" في أدوات ويندوز وقارئ الشاشة)، والحالة المختارة ظاهرة بصرياً
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, text));
     let hovered = enabled && response.hovered();
+    let rtl = ar();
     if selected {
         ui.painter().rect_filled(rect, 8.0, p.selected);
-        // شريط صغير بلون التطبيق يدل على الصفحة الحالية
-        let bar = egui::Rect::from_min_size(rect.left_center() - egui::vec2(0.0, 10.0), egui::vec2(3.0, 20.0));
-        ui.painter().rect_filled(bar, 2.0, p.accent);
+        let edge = if rtl { rect.right_center() - egui::vec2(3.0, 10.0) } else { rect.left_center() - egui::vec2(0.0, 10.0) };
+        ui.painter().rect_filled(egui::Rect::from_min_size(edge, egui::vec2(3.0, 20.0)), 2.0, p.accent);
     } else if hovered {
         ui.painter().rect_filled(rect, 8.0, p.hover);
     }
@@ -306,11 +356,17 @@ pub fn nav_item(ui: &mut egui::Ui, icon: Icon, text: &str, selected: bool, enabl
     } else {
         p.muted
     };
-    let icon_rect = egui::Rect::from_center_size(egui::pos2(rect.left() + 26.0, rect.center().y), egui::vec2(20.0, 20.0));
+    let icon_x = if rtl { rect.right() - 26.0 } else { rect.left() + 26.0 };
+    let icon_rect = egui::Rect::from_center_size(egui::pos2(icon_x, rect.center().y), egui::vec2(20.0, 20.0));
     icons::paint(ui.painter(), icon_rect, icon, color, 0.0);
     let text_color = if !enabled { p.muted.gamma_multiply(0.7) } else if selected { p.text } else { p.muted };
     let font = FontId::new(15.5, if selected { FontFamily::Name(SEMIBOLD.into()) } else { FontFamily::Proportional });
-    ui.painter().text(egui::pos2(rect.left() + 48.0, rect.center().y), egui::Align2::LEFT_CENTER, text, font, text_color);
+    let (pos, align) = if rtl {
+        (egui::pos2(rect.right() - 48.0, rect.center().y), egui::Align2::RIGHT_CENTER)
+    } else {
+        (egui::pos2(rect.left() + 48.0, rect.center().y), egui::Align2::LEFT_CENTER)
+    };
+    ui.painter().text(pos, align, show(text), font, text_color);
     if enabled {
         response.on_hover_cursor(egui::CursorIcon::PointingHand)
     } else {
@@ -318,11 +374,11 @@ pub fn nav_item(ui: &mut egui::Ui, icon: Icon, text: &str, selected: bool, enabl
     }
 }
 
-/// مفتاح تشغيل/إيقاف مع عنوان وسطر شرح
+/// مفتاح تشغيل/إيقاف مع عنوان وسطر شرح (المفتاح عند بداية السطر). النصوص كما هي، تُجهّز هنا
 pub fn toggle_row(ui: &mut egui::Ui, enabled: bool, on: &mut bool, title: &str, help: &str) -> bool {
     let p = pal();
     let mut changed = false;
-    ui.horizontal(|ui| {
+    let mut draw = |ui: &mut egui::Ui| {
         let size = egui::vec2(44.0, 24.0);
         let (rect, response) = ui.allocate_exact_size(size, if enabled { egui::Sense::click() } else { egui::Sense::hover() });
         if response.clicked() {
@@ -336,16 +392,25 @@ pub fn toggle_row(ui: &mut egui::Ui, enabled: bool, on: &mut bool, title: &str, 
         if response.has_focus() {
             ui.painter().rect_stroke(rect.expand(2.0), 14.0, Stroke::new(2.0_f32, p.accent));
         }
-        let x = egui::lerp(rect.left() + 12.0..=rect.right() - 12.0, t);
+        // في العربية "تشغيل" هو جهة اليسار، كما في ويندوز بالعربية
+        let (off_x, on_x) = if ar() { (rect.right() - 12.0, rect.left() + 12.0) } else { (rect.left() + 12.0, rect.right() - 12.0) };
+        let x = egui::lerp(off_x..=on_x, t);
         ui.painter().circle_filled(egui::pos2(x, rect.center().y), 9.0, if enabled { Color32::WHITE } else { p.muted });
         if enabled {
             response.on_hover_cursor(egui::CursorIcon::PointingHand);
         }
-        ui.vertical(|ui| {
-            ui.label(strong(title, 15.0).color(if enabled { p.text } else { p.muted }));
-            ui.label(RichText::new(help).small().color(p.muted));
+        column(ui, |ui| {
+            ui.label(strong(show(title), 15.0).color(if enabled { p.text } else { p.muted }));
+            para(ui, help, 13.0, p.muted, false);
         });
-    });
+    };
+    // صف بارتفاع المحتوى: المفتاح ثم النصوص
+    if ar() {
+        let width = ui.available_width();
+        ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::right_to_left(egui::Align::Min), |ui| draw(ui));
+    } else {
+        ui.horizontal_top(|ui| draw(ui));
+    }
     changed
 }
 
@@ -354,7 +419,7 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
 }
 
-/// مربع إحصاء: أيقونة ورقم كبير ووصف
+/// مربع إحصاء: أيقونة ورقم كبير ووصف (الوصف كما هو، يُجهّز هنا)
 pub fn stat(ui: &mut egui::Ui, width: f32, icon: Icon, value: usize, label: &str, color: Color32) {
     let p = pal();
     egui::Frame::none()
@@ -365,53 +430,67 @@ pub fn stat(ui: &mut egui::Ui, width: f32, icon: Icon, value: usize, label: &str
         .show(ui, |ui| {
             // داخل صف أفقي: المحتوى عمودي والعرض ثابت حتى لا يتجاوز الصف حافة النافذة
             ui.set_width(width);
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
+            column(ui, |ui| {
+                row(ui, |ui| {
                     icons::show(ui, icon, 18.0, color);
                     ui.label(strong(value.to_string(), 24.0).color(color));
                 });
-                ui.add(egui::Label::new(RichText::new(label).small().color(p.muted)).truncate(true));
+                ui.add(egui::Label::new(RichText::new(show(label)).small().color(p.muted)).truncate(!ar()));
             });
         });
 }
 
-/// شارة صغيرة بأيقونة. حجمها يُحسب قبل وضعها حتى ينتقل الصف لسطر جديد عند امتلائه
+/// شارة صغيرة بأيقونة (النص جاهز للرسم). حجمها يُحسب قبل وضعها حتى ينتقل الصف لسطر جديد
 pub fn chip(ui: &mut egui::Ui, icon: Icon, text: &str) {
     let p = pal();
     let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(13.0), p.text);
     let size = egui::vec2(galley.size().x + 44.0, 30.0);
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     ui.painter().rect_filled(rect, 15.0, p.chip);
-    let icon_rect = egui::Rect::from_center_size(egui::pos2(rect.left() + 19.0, rect.center().y), egui::vec2(15.0, 15.0));
+    let (icon_x, text_x) = if ar() { (rect.right() - 19.0, rect.left() + 12.0) } else { (rect.left() + 19.0, rect.left() + 32.0) };
+    let icon_rect = egui::Rect::from_center_size(egui::pos2(icon_x, rect.center().y), egui::vec2(15.0, 15.0));
     icons::paint(ui.painter(), icon_rect, icon, p.accent, 0.0);
-    ui.painter().galley(egui::pos2(rect.left() + 32.0, rect.center().y - galley.size().y / 2.0), galley, p.text);
+    ui.painter().galley(egui::pos2(text_x, rect.center().y - galley.size().y / 2.0), galley, p.text);
 }
 
-/// اختيار من عدة خيارات متجاورة (مثل: System / Light / Dark)
+/// اختيار من عدة خيارات متجاورة (مثل: System / Light / Dark)، الأول عند بداية السطر
 pub fn segmented(ui: &mut egui::Ui, options: &[&str], selected: &mut usize) -> bool {
     let p = pal();
     let mut changed = false;
-    egui::Frame::none().fill(p.chip).rounding(9.0).inner_margin(egui::Margin::same(3.0)).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            for (i, option) in options.iter().enumerate() {
-                let active = *selected == i;
-                let galley = ui.painter().layout_no_wrap(option.to_string(), FontId::proportional(14.0), p.text);
-                let (rect, response) = ui.allocate_exact_size(egui::vec2(galley.size().x + 28.0, 30.0), egui::Sense::click());
-                response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, active, *option));
-                if active {
-                    ui.painter().rect(rect, 7.0, p.surface, Stroke::new(1.0_f32, p.border));
-                } else if response.hovered() {
-                    ui.painter().rect_filled(rect, 7.0, p.hover);
+    // العرض يُحسب مسبقاً ليأخذ المكوّن عرض محتواه فقط (يتوسّط في شاشة الترحيب ويُحاذى لبداية السطر في غيرها)
+    let width: f32 = options
+        .iter()
+        .map(|o| ui.painter().layout_no_wrap(rtl::for_display(o), FontId::proportional(14.0), p.text).size().x + 28.0)
+        .sum::<f32>()
+        + 2.0 * (options.len().saturating_sub(1)) as f32
+        + 6.0;
+    ui.allocate_ui(egui::vec2(width, 36.0), |ui| {
+        egui::Frame::none().fill(p.chip).rounding(9.0).inner_margin(egui::Margin::same(3.0)).show(ui, |ui| {
+            // بعرض محتواه فقط (يتوسّط في شاشة الترحيب)، والخيار الأول عند بداية السطر
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let order: Vec<usize> = if ar() { (0..options.len()).rev().collect() } else { (0..options.len()).collect() };
+                for i in order {
+                    let option = &options[i];
+                    let active = *selected == i;
+                    let label = rtl::for_display(option);
+                    let galley = ui.painter().layout_no_wrap(label.clone(), FontId::proportional(14.0), p.text);
+                    let (rect, response) = ui.allocate_exact_size(egui::vec2(galley.size().x + 28.0, 30.0), egui::Sense::click());
+                    response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, active, *option));
+                    if active {
+                        ui.painter().rect(rect, 7.0, p.surface, Stroke::new(1.0_f32, p.border));
+                    } else if response.hovered() {
+                        ui.painter().rect_filled(rect, 7.0, p.hover);
+                    }
+                    let color = if active { p.text } else { p.muted };
+                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, label, FontId::proportional(14.0), color);
+                    if response.clicked() && !active {
+                        *selected = i;
+                        changed = true;
+                    }
+                    response.on_hover_cursor(egui::CursorIcon::PointingHand);
                 }
-                let color = if active { p.text } else { p.muted };
-                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, *option, FontId::proportional(14.0), color);
-                if response.clicked() && !active {
-                    *selected = i;
-                    changed = true;
-                }
-                response.on_hover_cursor(egui::CursorIcon::PointingHand);
-            }
+            });
         });
     });
     changed

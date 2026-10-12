@@ -202,7 +202,10 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32, ro
     let scale = rect.width().min(rect.height()) / 24.0;
     let center = rect.center();
     let (sin, cos) = rotation.sin_cos();
+    // في الواجهة العربية تنعكس الأيقونات التي لها اتجاه (السهم، التراجع، الفتح خارجياً)
+    let mirror = crate::i18n::ar() && matches!(icon, Icon::ArrowRight | Icon::Undo | Icon::External);
     let map = |(x, y): (f32, f32)| -> Pos2 {
+        let x = if mirror { 24.0 - x } else { x };
         let (dx, dy) = ((x - 12.0) * scale, (y - 12.0) * scale);
         Pos2::new(center.x + dx * cos - dy * sin, center.y + dx * sin + dy * cos)
     };
@@ -222,7 +225,7 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32, ro
                 painter.add(Shape::line(arc_points(*x, *y, *r, *from, *to).into_iter().map(map).collect(), stroke));
             }
             Rect(x0, y0, x1, y1, r) => {
-                let rect = egui::Rect::from_min_max(map((*x0, *y0)), map((*x1, *y1)));
+                let rect = egui::Rect::from_two_pos(map((*x0, *y0)), map((*x1, *y1)));
                 painter.rect_stroke(rect, r * scale, stroke);
             }
             Dot(x, y, r) => {

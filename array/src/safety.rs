@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::{Component, Path};
 
+use crate::i18n::tr;
+
 pub struct SafetyChecker;
 
 /// مجلدات نظام لا يجوز اختيارها ولا تنظيم أي شيء داخلها (أول جزء بعد جذر القرص)
@@ -77,11 +79,11 @@ pub enum ProgramFolder {
 impl ProgramFolder {
     pub fn reason(&self) -> String {
         match self {
-            Self::Project(name) => format!("software project ({})", name),
-            Self::Library(name) => format!("program files ({})", name),
-            Self::Script(name) => format!("scripts or code ({})", name),
-            Self::Program(name) => format!("program ({})", name),
-            Self::Config(name) => format!("program settings ({})", name),
+            Self::Project(name) => format!("{} ({})", tr("software project", "مشروع برمجي"), name),
+            Self::Library(name) => format!("{} ({})", tr("program files", "ملفات برنامج"), name),
+            Self::Script(name) => format!("{} ({})", tr("scripts or code", "سكريبتات أو كود"), name),
+            Self::Program(name) => format!("{} ({})", tr("program", "برنامج"), name),
+            Self::Config(name) => format!("{} ({})", tr("program settings", "إعدادات برنامج"), name),
         }
     }
 }
@@ -113,7 +115,11 @@ impl SafetyChecker {
     /// فحص المجلد المختار: يُرفض إذا كان هو نفسه برنامجاً أو مشروعاً
     pub fn check_root(path: &Path) -> Result<(), String> {
         if !Self::is_safe_root(path) {
-            return Err("The selected folder does not exist or is a protected system location.".to_string());
+            return Err(tr(
+                "The selected folder does not exist or is a protected system location.",
+                "المجلد المختار غير موجود أو هو مجلد نظام محمي.",
+            )
+            .to_string());
         }
         let is_user_library = path
             .file_name()
@@ -122,10 +128,11 @@ impl SafetyChecker {
             None => Ok(()),
             // ملف تثبيت داخل Downloads أو Desktop لا يجعلها مجلد برنامج
             Some(ProgramFolder::Program(_) | ProgramFolder::Config(_)) if is_user_library => Ok(()),
-            Some(kind) => Err(format!(
-                "This folder belongs to a {}. Moving its files could stop it from working, so Array will not organize it.",
-                kind.reason()
-            )),
+            Some(kind) => Err(if crate::i18n::ar() {
+                format!("هذا المجلد فيه {}. نقل ملفاته قد يوقفه عن العمل، لذلك لن يرتّبه Array.", kind.reason())
+            } else {
+                format!("This folder belongs to a {}. Moving its files could stop it from working, so Array will not organize it.", kind.reason())
+            }),
         }
     }
 

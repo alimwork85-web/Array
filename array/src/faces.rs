@@ -66,7 +66,7 @@ fn load_model(bytes: &[u8], shape: [usize; 4]) -> Result<Model, String> {
         .and_then(|m| m.with_input_fact(0, f32::fact(shape).into()))
         .and_then(|m| m.into_optimized())
         .and_then(|m| m.into_runnable())
-        .map_err(|e| format!("Could not load the face model: {e}"))
+        .map_err(|e| format!("{} {e}", crate::i18n::tr("Could not load the face model:", "تعذّر تحميل نموذج الوجوه:")))
 }
 
 /// قراءة الصورة مع تطبيق اتجاه EXIF (صور الجوال تُحفظ مائلة ويُكتب اتجاهها في EXIF)

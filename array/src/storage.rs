@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::tr;
 use crate::organizer::{Options, PlannedMove};
 
 /// سجل آخر عملية تنظيم، ويُكتب قبل نقل أي ملف حتى يمكن التراجع حتى لو توقف البرنامج فجأة
@@ -61,7 +62,7 @@ impl Storage {
     /// مسح ذاكرة الوجوه: تُعاد بناؤها تلقائياً في التحليل التالي
     pub fn clear_face_cache(&self) -> Result<(), String> {
         match fs::remove_file(self.face_cache_path()) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("Could not clear the face memory: {}", e)),
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("{} {}", tr("Could not clear the face memory:", "تعذّر مسح ذاكرة الوجوه:"), e)),
             _ => Ok(()),
         }
     }
@@ -76,7 +77,7 @@ impl Storage {
         fs::create_dir_all(&self.dir)
             .and_then(|_| fs::write(&tmp, contents))
             .and_then(|_| fs::rename(&tmp, path))
-            .map_err(|e| format!("Could not save {}: {}", path.display(), e))
+            .map_err(|e| format!("{} {}: {}", tr("Could not save", "تعذّر حفظ"), path.display(), e))
     }
 
     /// إذا لم يوجد الملف يُنشأ بالقيم الافتراضية ليتمكن المستخدم من تعديله.
@@ -85,13 +86,19 @@ impl Storage {
         let path = self.settings_path();
         match fs::read_to_string(&path) {
             Ok(text) => serde_json::from_str(&text)
-                .map_err(|e| format!("settings.json is not valid ({}). Default settings are used until it is fixed.", e)),
+                .map_err(|e| {
+                    if crate::i18n::ar() {
+                        format!("ملف settings.json غير صالح ({}). تُستخدم الإعدادات الافتراضية حتى يُصلح.", e)
+                    } else {
+                        format!("settings.json is not valid ({}). Default settings are used until it is fixed.", e)
+                    }
+                }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let defaults = Options::default();
                 self.save_settings(&defaults)?;
                 Ok(defaults)
             }
-            Err(e) => Err(format!("Could not read settings.json: {}", e)),
+            Err(e) => Err(format!("{} {}", tr("Could not read settings.json:", "تعذّرت قراءة settings.json:"), e)),
         }
     }
 
@@ -107,15 +114,15 @@ impl Storage {
 
     pub fn load_undo(&self) -> Result<Option<UndoLog>, String> {
         match fs::read_to_string(self.undo_path()) {
-            Ok(text) => serde_json::from_str(&text).map(Some).map_err(|e| format!("The undo record is damaged: {}", e)),
+            Ok(text) => serde_json::from_str(&text).map(Some).map_err(|e| format!("{} {}", tr("The undo record is damaged:", "سجل التراجع تالف:"), e)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(format!("Could not read the undo record: {}", e)),
+            Err(e) => Err(format!("{} {}", tr("Could not read the undo record:", "تعذّرت قراءة سجل التراجع:"), e)),
         }
     }
 
     pub fn clear_undo(&self) -> Result<(), String> {
         match fs::remove_file(self.undo_path()) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("Could not clear the undo record: {}", e)),
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("{} {}", tr("Could not clear the undo record:", "تعذّر مسح سجل التراجع:"), e)),
             _ => Ok(()),
         }
     }
