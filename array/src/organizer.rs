@@ -149,7 +149,7 @@ impl OrganizerEngine {
 
     fn check_source(source_path: &Path) -> Result<PathBuf, String> {
         if !source_path.is_dir() || !SafetyChecker::is_safe_root(source_path) {
-            return Err("المسار المحدد غير آمن أو غير موجود!".to_string());
+            return Err("The selected folder does not exist or is a protected system location.".to_string());
         }
         Ok(source_path.join("Array_Organized"))
     }
@@ -185,7 +185,7 @@ impl OrganizerEngine {
     pub fn process_directory(source_path: &Path) -> Result<String, String> {
         let output_base = Self::check_source(source_path)?;
         if let Err(e) = fs::create_dir_all(&output_base) {
-            return Err(format!("فشل إنشاء مجلد المخرجات: {}", e));
+            return Err(format!("Could not create the output folder: {}", e));
         }
 
         let mut raw_files: Vec<RawFileInfo> = Vec::new();
@@ -320,7 +320,7 @@ impl OrganizerEngine {
             };
 
             if let Err(e) = fs::create_dir_all(&target_dir) {
-                return Err(format!("فشل إنشاء المجلد: {}", e));
+                return Err(format!("Could not create folder: {}", e));
             }
 
             let mut new_filename = format!("{}.{}", f.clean_title, f.extension);

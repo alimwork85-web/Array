@@ -2,6 +2,7 @@
 
 mod normalizer;
 mod organizer;
+mod rtl;
 mod safety;
 
 use eframe::egui;
@@ -26,7 +27,10 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Array File Organizer v1.0",
         options,
-        Box::new(|_cc| Box::new(ArrayApp::default())),
+        Box::new(|cc| {
+            rtl::install_arabic_font(&cc.egui_ctx);
+            Box::new(ArrayApp::default())
+        }),
     )
 }
 
@@ -193,7 +197,7 @@ impl eframe::App for ArrayApp {
                 ui.add_space(10.0);
 
                 if let Some(ref path) = self.selected_path {
-                    ui.label(format!("Selected: {}", path.display()));
+                    ui.label(rtl::for_display(&format!("Selected: {}", path.display())));
                     ui.add_space(15.0);
 
                     if ui.add_enabled(!busy, egui::Button::new("⚡ Start Organizing Now")).clicked() {
@@ -207,7 +211,7 @@ impl eframe::App for ArrayApp {
                 ui.add_space(20.0);
                 ui.separator();
                 ui.add_space(10.0);
-                ui.label(&self.status_message);
+                ui.label(rtl::for_display(&self.status_message));
             });
         });
 
