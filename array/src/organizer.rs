@@ -133,31 +133,29 @@ impl OrganizerEngine {
         result
     }
 
-    fn remove_empty_dirs(dir: &Path, skip_dir: &Path) {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let skipped = SafetyChecker::is_skipped_dir_name(&entry.file_name().to_string_lossy());
-                if path.is_dir() && path != skip_dir && !skipped {
-                    Self::remove_empty_dirs(&path, skip_dir);
-                    let _ = fs::remove_dir(&path);
+    /// حذف المجلدات التي أفرغها البرنامج فقط، صعوداً حتى المجلد المختار.
+    /// المجلدات التي كانت فارغة قبل التشغيل لا تُلمس، و remove_dir يرفض أي مجلد غير فارغ.
+    fn remove_emptied_dirs(moved_from: &[PathBuf], source_path: &Path) {
+        for file in moved_from {
+            let mut dir = file.parent();
+            while let Some(d) = dir {
+                if d == source_path || !d.starts_with(source_path) || fs::remove_dir(d).is_err() {
+                    break;
                 }
+                dir = d.parent();
             }
         }
     }
 
-    pub fn process_directory(source_path: &Path) -> Result<String, String> {
+    fn check_source(source_path: &Path) -> Result<PathBuf, String> {
         if !source_path.is_dir() || !SafetyChecker::is_safe_root(source_path) {
             return Err("المسار المحدد غير آمن أو غير موجود!".to_string());
         }
+        Ok(source_path.join("Array_Organized"))
+    }
 
-        let output_base = source_path.join("Array_Organized");
-        if let Err(e) = fs::create_dir_all(&output_base) {
-            return Err(format!("فشل إنشاء مجلد المخرجات: {}", e));
-        }
-
-        let mut raw_files: Vec<RawFileInfo> = Vec::new();
-
+    /// كل الملفات المعروفة الأنواع التي سيتم نقلها
+    fn collect_files(source_path: &Path, output_base: &Path) -> Vec<PathBuf> {
         // تخطّي مجلد المخرجات والمجلدات المخفية/مجلدات البرامج بكل ما فيها
         let walker = WalkDir::new(source_path).into_iter().filter_entry(|e| {
             e.depth() == 0
@@ -165,54 +163,74 @@ impl OrganizerEngine {
                 || (e.path() != output_base && !SafetyChecker::is_skipped_dir_name(&e.file_name().to_string_lossy()))
         });
 
-        for entry in walker.filter_map(|e| e.ok()) {
-            let path = entry.path();
+        walker
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| !matches!(Self::get_file_type(ext), FileType::Other))
+            })
+            .map(|e| e.into_path())
+            .collect()
+    }
 
-            if entry.file_type().is_file() {
-                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    let file_type = Self::get_file_type(ext);
-                    let ext_lower = ext.to_lowercase();
-                    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    /// عدد الملفات التي سيتم نقلها (للتأكيد قبل البدء)
+    pub fn count_files(source_path: &Path) -> Result<usize, String> {
+        let output_base = Self::check_source(source_path)?;
+        Ok(Self::collect_files(source_path, &output_base).len())
+    }
 
-                    match file_type {
-                        FileType::Audio => {
-                            let (artist, title) = Self::extract_audio_info(path);
-                            raw_files.push(RawFileInfo {
-                                path: path.to_path_buf(),
-                                category: "Music".to_string(),
-                                raw_artist_or_group: artist,
-                                clean_title: title,
-                                extension: ext_lower,
-                            });
-                        }
-                        FileType::Other => {}
-                        other => {
-                            let category = match other {
-                                FileType::Image => "Pictures",
-                                FileType::Video => "Videos",
-                                FileType::Document => "Documents",
-                                _ => "Archives",
-                            };
-                            raw_files.push(RawFileInfo {
-                                path: path.to_path_buf(),
-                                category: category.to_string(),
-                                raw_artist_or_group: "General".to_string(),
-                                clean_title: Self::clean_string(&stem),
-                                extension: ext_lower,
-                            });
-                        }
-                    }
-                }
-            }
+    pub fn process_directory(source_path: &Path) -> Result<String, String> {
+        let output_base = Self::check_source(source_path)?;
+        if let Err(e) = fs::create_dir_all(&output_base) {
+            return Err(format!("فشل إنشاء مجلد المخرجات: {}", e));
         }
 
-        let (moved, failed) = Self::organize_files(raw_files, &output_base)?;
-        Self::remove_empty_dirs(source_path, &output_base);
+        let mut raw_files: Vec<RawFileInfo> = Vec::new();
 
-        let mut msg = format!("Successfully moved and organized {} files into {}", moved, output_base.display());
+        for path in Self::collect_files(source_path, &output_base) {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
+            let ext_lower = ext.to_lowercase();
+            let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+
+            let info = match Self::get_file_type(ext) {
+                FileType::Audio => {
+                    let (artist, title) = Self::extract_audio_info(&path);
+                    RawFileInfo {
+                        path,
+                        category: "Music".to_string(),
+                        raw_artist_or_group: artist,
+                        clean_title: title,
+                        extension: ext_lower,
+                    }
+                }
+                other => {
+                    let category = match other {
+                        FileType::Image => "Pictures",
+                        FileType::Video => "Videos",
+                        FileType::Document => "Documents",
+                        _ => "Archives",
+                    };
+                    RawFileInfo {
+                        path,
+                        category: category.to_string(),
+                        raw_artist_or_group: "General".to_string(),
+                        clean_title: Self::clean_string(&stem),
+                        extension: ext_lower,
+                    }
+                }
+            };
+            raw_files.push(info);
+        }
+
+        let (moved_from, failed) = Self::organize_files(raw_files, &output_base)?;
+        Self::remove_emptied_dirs(&moved_from, source_path);
+
+        let mut msg = format!("Successfully moved and organized {} files into {}", moved_from.len(), output_base.display());
         if failed > 0 {
-            msg.push_str(&format!("
-⚠ {} files could not be moved (in use or access denied) and were left in place.", failed));
+            msg.push_str(&format!("\n⚠ {} files could not be moved (in use or access denied) and were left in place.", failed));
         }
         Ok(msg)
     }
@@ -252,8 +270,8 @@ impl OrganizerEngine {
         (artist, if clean_tit.is_empty() { "Audio Track".to_string() } else { clean_tit })
     }
 
-    /// يرجع (عدد الملفات المنقولة، عدد الملفات التي فشل نقلها)
-    fn organize_files(files: Vec<RawFileInfo>, output_base: &Path) -> Result<(usize, usize), String> {
+    /// يرجع (المسارات الأصلية للملفات المنقولة، عدد الملفات التي فشل نقلها)
+    fn organize_files(files: Vec<RawFileInfo>, output_base: &Path) -> Result<(Vec<PathBuf>, usize), String> {
         struct ProcessedItem {
             file: RawFileInfo,
             group_display_name: String,
@@ -263,7 +281,7 @@ impl OrganizerEngine {
         let mut processed_items: Vec<ProcessedItem> = Vec::new();
         let mut group_counts: HashMap<String, usize> = HashMap::new();
         let mut group_canonical_names: HashMap<String, String> = HashMap::new();
-        let (mut moved, mut failed) = (0, 0);
+        let (mut moved_from, mut failed) = (Vec::new(), 0);
 
         for f in files {
             let (display_name, norm_key) = if f.category == "Music" {
@@ -317,12 +335,12 @@ impl OrganizerEngine {
             }
 
             match Self::move_file(&f.path, &dest_path) {
-                Ok(()) => moved += 1,
+                Ok(()) => moved_from.push(f.path),
                 Err(_) => failed += 1,
             }
         }
 
-        Ok((moved, failed))
+        Ok((moved_from, failed))
     }
 }
 #[cfg(test)]
@@ -396,7 +414,9 @@ mod tests {
             "AppData/config.txt",
         ]);
         fs::create_dir_all(root.join(".git/empty")).unwrap();
+        fs::create_dir_all(root.join("keep_me/inner")).unwrap();
 
+        assert_eq!(OrganizerEngine::count_files(&root).unwrap(), 6);
         let msg = OrganizerEngine::process_directory(&root).unwrap();
         let out = root.join("Array_Organized");
 
@@ -412,6 +432,8 @@ mod tests {
         assert!(root.join("AppData/config.txt").exists());
         // المجلدات التي أُفرغت تُحذف
         assert!(!root.join("a").exists() && !root.join("docs").exists());
+        // المجلدات التي كانت فارغة قبل التشغيل تبقى
+        assert!(root.join("keep_me/inner").is_dir());
         assert!(msg.contains('6'), "{msg}");
 
         fs::remove_dir_all(&root).unwrap();
