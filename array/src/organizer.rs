@@ -39,6 +39,9 @@ pub struct Options {
     pub speaker_keywords: Vec<String>,
     /// كلمات تدل على مقاطع الذكاء الاصطناعي (اسم الأداة مثل gemini أو suno)
     pub ai_markers: Vec<String>,
+    /// الملفات الموجودة داخل مجلدات فرعية تبقى كما هي (لا تُنقل ولا يُعاد تسميتها)؛
+    /// فقط الملفات المتفرقة في المجلد المختار تُنظَّم. عند false تُفرَّغ كل المجلدات ويُعاد بناؤها.
+    pub keep_existing_folders: bool,
 }
 
 impl Default for Options {
@@ -47,6 +50,7 @@ impl Default for Options {
             rename_files: true,
             speaker_keywords: DEFAULT_SPEAKER_KEYWORDS.iter().map(|k| k.to_string()).collect(),
             ai_markers: DEFAULT_AI_MARKERS.iter().map(|k| k.to_string()).collect(),
+            keep_existing_folders: true,
         }
     }
 }
@@ -66,6 +70,8 @@ pub struct Plan {
     pub new_dirs: Vec<PathBuf>,
     /// ملفات موجودة أصلاً في مكانها الصحيح وباسمها الصحيح فلا تتحرك
     pub in_place: usize,
+    /// ملفات داخل مجلدات المستخدم الموجودة تُركت كما هي (خيار keep_existing_folders)
+    pub kept_in_folders: usize,
     /// مجلدات برامج أو مشاريع لم يُلمس أي شيء داخلها، مع السبب
     pub skipped: Vec<(PathBuf, String)>,
 }
@@ -234,7 +240,7 @@ impl OrganizerEngine {
     fn category_synonyms(category: &str) -> &'static [&'static str] {
         match category {
             "Music" => &["music", "songs", "audio", "موسيقى", "الموسيقى", "أغاني", "الأغاني", "صوتيات"],
-            "Pictures" => &["pictures", "photos", "images", "صور", "الصور"],
+            "Pictures" => &["pictures", "photos", "photo", "images", "image", "صور", "الصور", "صورة", "الصورة"],
             "Videos" => &["videos", "video", "movies", "فيديو", "فيديوهات", "الفيديو", "مقاطع فيديو", "أفلام"],
             "Documents" => &["documents", "docs", "مستندات", "المستندات", "وثائق"],
             _ => &["archives", "compressed", "أرشيف", "مضغوطات", "ملفات مضغوطة"],
@@ -408,6 +414,19 @@ impl OrganizerEngine {
             let clean = Self::clean_string(&name);
             (!naming::is_junk_name(&clean)).then_some(clean)
         };
+        // مجلدات المستخدم الموجودة لا تُلمس: ملفاتها تبقى كما هي بالاسم والمكان
+        let kept = |path: &Path| -> bool {
+            let Ok(relative) = path.strip_prefix(source_path) else { return false };
+            let mut parts = relative.components();
+            let first = parts.next().map(|c| c.as_os_str().to_string_lossy().trim().to_lowercase());
+            let inside_subfolder = parts.next().is_some();
+            // مجلدات أنشأتها نسخ قديمة من البرنامج ليست تنظيماً للمستخدم
+            inside_subfolder && !matches!(first.as_deref(), Some("single tracks" | "unknown" | "array_organized"))
+        };
+        let (raw_files, kept_files): (Vec<RawFileInfo>, Vec<RawFileInfo>) =
+            raw_files.into_iter().partition(|f| !(options.keep_existing_folders && kept(&f.path)));
+        let kept_in_folders = kept_files.len();
+
         let targeted: Vec<(RawFileInfo, PathBuf)> = raw_files
             .into_iter()
             .map(|mut f| {
@@ -451,7 +470,7 @@ impl OrganizerEngine {
         }
         new_dirs.sort();
 
-        Ok(Plan { source: source_path.to_path_buf(), moves, new_dirs, in_place, skipped })
+        Ok(Plan { source: source_path.to_path_buf(), moves, new_dirs, in_place, kept_in_folders, skipped })
     }
 
     /// تنفيذ الخطة: نقل الملفات ثم حذف المجلدات التي أُفرغت. progress يزيد مع كل ملف.
@@ -571,6 +590,11 @@ impl OrganizerEngine {
 pub(crate) mod tests {
     use super::*;
 
+    /// وضع إعادة البناء: تُفرَّغ المجلدات الفرعية ويُعاد تنظيمها
+    fn rebuild() -> Options {
+        Options { keep_existing_folders: false, ..Options::default() }
+    }
+
     fn keywords() -> Vec<String> {
         DEFAULT_SPEAKER_KEYWORDS.iter().map(|k| OrganizerEngine::group_key(k)).collect()
     }
@@ -672,7 +696,7 @@ pub(crate) mod tests {
     #[test]
     fn plan_moves_nothing() {
         let root = temp_tree("plan", &["a/IMG_1.jpg", "IMG 1.jpg"]);
-        let plan = OrganizerEngine::plan(&root, &Options::default()).unwrap();
+        let plan = OrganizerEngine::plan(&root, &rebuild()).unwrap();
 
         assert_eq!(plan.moves.len(), 2);
         assert!(root.join("a/IMG_1.jpg").exists() && !root.join("Pictures").exists());
@@ -687,7 +711,7 @@ pub(crate) mod tests {
         // المثال: مجلد "صور" موجود يُعاد استخدامه، والفئات الأخرى تُنشأ، و"رحلة 2023" يُفرَّغ ويُحذف
         let root = temp_tree("inplace", &["رحلة 2023/sea.jpg", "رحلة 2023/clip.mp4", "صور/cat.png", "cv.pdf"]);
 
-        let (plan, result) = organize(&root, &Options::default());
+        let (plan, result) = organize(&root, &rebuild());
 
         assert!(result.failed.is_empty());
         assert_eq!(tree(&root), ["Documents/cv.pdf", "Videos/clip.mp4", "صور/cat.png", "صور/sea.jpg"]);
@@ -709,7 +733,7 @@ pub(crate) mod tests {
             "new/cv.docx",
         ]);
 
-        organize(&root, &Options::default());
+        organize(&root, &rebuild());
 
         assert!(root.join("Photos/sea.jpg").exists());
         assert!(root.join("الموسيقى/منوعات/song.mp3").exists());
@@ -727,10 +751,10 @@ pub(crate) mod tests {
             "IMG_001.jpg",
             "docs/report (final).pdf",
         ]);
-        organize(&root, &Options::default());
+        organize(&root, &rebuild());
         let after_first = tree(&root);
 
-        let second = OrganizerEngine::plan(&root, &Options::default()).unwrap();
+        let second = OrganizerEngine::plan(&root, &rebuild()).unwrap();
 
         assert!(second.moves.is_empty(), "{:?}", second.moves);
         assert_eq!(second.in_place, 5);
@@ -747,7 +771,7 @@ pub(crate) mod tests {
             "x/عمرو دياب - أغنية 3.mp3",
         ]);
 
-        organize(&root, &Options::default());
+        organize(&root, &rebuild());
 
         assert_eq!(fs::read_dir(root.join("Music/عمرو دياب")).unwrap().count(), 4);
         fs::remove_dir_all(&root).unwrap();
@@ -757,7 +781,7 @@ pub(crate) mod tests {
     fn never_writes_into_a_program_folder_named_like_a_category() {
         let root = temp_tree("cat_program", &["Music/player.exe", "Music/skin.png", "new/song.mp3"]);
 
-        organize(&root, &Options::default());
+        organize(&root, &rebuild());
 
         assert!(root.join("Music (Array)/منوعات/song.mp3").exists());
         assert_eq!(fs::read_dir(root.join("Music")).unwrap().count(), 2);
@@ -780,7 +804,7 @@ pub(crate) mod tests {
         fs::create_dir_all(root.join("repo/.git/empty")).unwrap();
         fs::create_dir_all(root.join("keep_me/inner")).unwrap();
 
-        let (_, result) = organize(&root, &Options::default());
+        let (_, result) = organize(&root, &rebuild());
 
         assert_eq!(result.done.len(), 6);
         assert!(result.failed.is_empty());
@@ -825,7 +849,7 @@ pub(crate) mod tests {
             "loose.jpg",
         ]);
 
-        let plan = OrganizerEngine::plan(&root, &Options::default()).unwrap();
+        let plan = OrganizerEngine::plan(&root, &rebuild()).unwrap();
 
         // Photos مجلد صور موجود: sea.jpg في مكانه، و loose.jpg وحده ينتقل إليه
         let moved: Vec<_> = plan.moves.iter().map(|m| m.from.strip_prefix(&root).unwrap().to_path_buf()).collect();
@@ -840,7 +864,7 @@ pub(crate) mod tests {
     #[test]
     fn refuses_to_organize_a_program_folder_itself() {
         let root = temp_tree("tool_root", &["tool.exe", "data.txt"]);
-        let err = OrganizerEngine::plan(&root, &Options::default()).err().unwrap();
+        let err = OrganizerEngine::plan(&root, &rebuild()).err().unwrap();
         assert!(err.contains("program"), "{err}");
         assert!(root.join("data.txt").exists());
         fs::remove_dir_all(&root).unwrap();
@@ -849,7 +873,7 @@ pub(crate) mod tests {
     #[test]
     fn handles_all_media_and_document_types() {
         let root = temp_tree("types", &["a.heic", "b.mov", "c.flac", "d.xls", "e.7z", "f.lnk", "g.db", "h.unknown"]);
-        let plan = OrganizerEngine::plan(&root, &Options::default()).unwrap();
+        let plan = OrganizerEngine::plan(&root, &rebuild()).unwrap();
 
         let mut targets: Vec<_> = plan
             .moves
@@ -875,7 +899,7 @@ pub(crate) mod tests {
         ]);
         let music = root.join("Music");
 
-        organize(&music, &Options::default());
+        organize(&music, &rebuild());
 
         let files = tree(&music);
         // مجلد "house lo [AUD" يُنظَّف اسمه، وملفاته تأخذ اسماً من سياقها
@@ -891,15 +915,80 @@ pub(crate) mod tests {
     #[test]
     fn meaningless_names_stay_when_renaming_is_off() {
         let root = temp_tree("junk_off", &["x/4749d951].mp3"]);
-        organize(&root, &Options { rename_files: false, ..Options::default() });
+        organize(&root, &Options { rename_files: false, ..rebuild() });
         assert_eq!(tree(&root), ["Music/منوعات/4749d951].mp3"]);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// مثل D:\Photo عند المستخدم: مجلدات أشخاص وسنوات منظمة، وملفات متفرقة في المجلد نفسه
+    #[test]
+    fn default_mode_never_touches_existing_folders() {
+        let organized = [
+            "Photo/Ali/IMG_0001.jpg",
+            "Photo/Mom/133649_466985853345771_200500525.jpg",
+            "Photo/الصور من 2016/clip.mp4",
+            "Photo/الصور من 2016/IMG_2016.HEIC",
+            "Photo/بلا عنوان/4749d951.png",
+        ];
+        let loose = ["Photo/IMG_0612.jpg", "Photo/133649_466985853345771_200500525.jpg", "Photo/trip.mp4", "Photo/cv.pdf"];
+        let root = temp_tree("keep", &[&organized[..], &loose[..]].concat());
+        let photo = root.join("Photo");
+
+        let (plan, result) = organize(&photo, &Options::default());
+
+        assert_eq!(plan.kept_in_folders, organized.len());
+        assert!(result.failed.is_empty());
+        // كل ملف داخل المجلدات المنظمة باقٍ بنفس الاسم والمكان
+        for f in organized {
+            assert!(root.join(f).exists(), "{f} was touched");
+        }
+        // المجلد المختار اسمه Photo فهو مجلد الصور نفسه: الصور المتفرقة تبقى فيه، والباقي لمجلده
+        let files = tree(&photo);
+        assert!(files.contains(&"IMG 0612.jpg".to_string()), "{files:?}");
+        assert!(files.iter().any(|f| f.starts_with("Photo - 20")), "{files:?}");
+        assert!(files.contains(&"Videos/trip.mp4".to_string()), "{files:?}");
+        assert!(files.contains(&"Documents/cv.pdf".to_string()), "{files:?}");
+        assert!(!photo.join("Pictures").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn default_mode_still_files_loose_music_into_an_existing_artist_folder() {
+        let root = temp_tree("keep_music", &[
+            "Music/القارئ عبدالله الموسى/عبدالله الموسى 1.mp3",
+            "Music/القارئ عبدالله الموسى/عبدالله الموسى 2.mp3",
+            "Music/قناة القارئ عبدالله الموسى/تلاوة للقارئ عبدالله الموسى.mp3",
+            "Music/سورة مريم بصوت الشيخ عبدالله الموسى.mp3",
+        ]);
+        let music = root.join("Music");
+
+        organize(&music, &Options::default());
+
+        let files = tree(&music);
+        // الملف المتفرق يذهب للمجلد الموجود، والمجلدات الموجودة لا تُفرَّغ في هذا الوضع
+        assert!(files.contains(&"القارئ عبدالله الموسى/سورة مريم بصوت الشيخ عبدالله الموسى.mp3".to_string()), "{files:?}");
+        assert!(files.contains(&"قناة القارئ عبدالله الموسى/تلاوة للقارئ عبدالله الموسى.mp3".to_string()), "{files:?}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn default_mode_empties_folders_left_by_old_versions() {
+        let root = temp_tree("keep_old", &["Music/Single Tracks/song.mp3", "Music/Unknown/a b.mp3", "Music/Array_Organized/Pictures/sea.jpg"]);
+        let music = root.join("Music");
+
+        organize(&music, &Options::default());
+
+        let files = tree(&music);
+        assert!(!music.join("Single Tracks").exists() && !music.join("Unknown").exists() && !music.join("Array_Organized").exists(), "{files:?}");
+        assert!(files.contains(&"منوعات/song.mp3".to_string()), "{files:?}");
+        assert!(files.contains(&"Pictures/sea.jpg".to_string()), "{files:?}");
         fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
     fn keeps_original_names_when_renaming_is_off() {
         let root = temp_tree("norename", &["work/report (final).PDF", "IMG_001.jpg"]);
-        let options = Options { rename_files: false, ..Options::default() };
+        let options = Options { rename_files: false, ..rebuild() };
 
         organize(&root, &options);
 
@@ -917,7 +1006,7 @@ pub(crate) mod tests {
         fs::create_dir_all(root.join("keep_me")).unwrap();
         let before = tree(&root);
 
-        let (plan, result) = organize(&root, &Options::default());
+        let (plan, result) = organize(&root, &rebuild());
         assert!(!root.join("رحلة 2023").exists());
 
         let undone = undo(&plan, &result.done);
@@ -934,13 +1023,14 @@ pub(crate) mod tests {
     #[test]
     fn undo_after_an_interrupted_run_restores_only_moved_files() {
         let root = temp_tree("interrupted", &["a/1.pdf", "a/2.pdf", "a/3.pdf"]);
-        let plan = OrganizerEngine::plan(&root, &Options::default()).unwrap();
+        let plan = OrganizerEngine::plan(&root, &rebuild()).unwrap();
         // البرنامج توقف بعد نقل أول ملف فقط، والسجل يحتوي الخطة كاملة
         let partial = Plan {
             source: plan.source.clone(),
             moves: plan.moves[..1].to_vec(),
             new_dirs: plan.new_dirs.clone(),
             in_place: 0,
+            kept_in_folders: 0,
             skipped: Vec::new(),
         };
         OrganizerEngine::execute(&partial, &AtomicUsize::new(0));
@@ -956,7 +1046,7 @@ pub(crate) mod tests {
     #[test]
     fn undo_never_overwrites_a_new_file() {
         let root = temp_tree("undo_clash", &["old/report.pdf"]);
-        let (plan, result) = organize(&root, &Options::default());
+        let (plan, result) = organize(&root, &rebuild());
         // المستخدم أنشأ ملفاً جديداً بنفس الاسم الأصلي بعد التنظيم
         fs::create_dir_all(root.join("old")).unwrap();
         fs::write(root.join("old/report.pdf"), b"new").unwrap();
@@ -972,7 +1062,7 @@ pub(crate) mod tests {
     #[test]
     fn execute_never_overwrites_a_file_created_after_planning() {
         let root = temp_tree("late_clash", &["report.pdf"]);
-        let plan = OrganizerEngine::plan(&root, &Options::default()).unwrap();
+        let plan = OrganizerEngine::plan(&root, &rebuild()).unwrap();
         fs::create_dir_all(root.join("Documents")).unwrap();
         fs::write(root.join("Documents/report.pdf"), b"other").unwrap();
 
@@ -992,7 +1082,7 @@ pub(crate) mod tests {
         // فتح الملف بدون مشاركة يمنع نقله وحذفه، كأنه مفتوح في برنامج آخر
         let lock = fs::OpenOptions::new().read(true).share_mode(0).open(root.join("locked.pdf")).unwrap();
 
-        let (_, result) = organize(&root, &Options::default());
+        let (_, result) = organize(&root, &rebuild());
 
         assert_eq!((result.done.len(), result.failed.len()), (1, 1));
         assert!(root.join("locked.pdf").exists());

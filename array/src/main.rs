@@ -84,6 +84,9 @@ fn poll<T>(rx: &Receiver<Result<T, String>>) -> Option<Result<T, String>> {
     }
 }
 
+/// اسم المجلد المختار نفسه في ملخص المعاينة
+const THIS_FOLDER: &str = "This folder";
+
 /// خطة جاهزة للعرض: النصوص محسوبة مرة واحدة وليس في كل إطار
 struct Preview {
     plan: Plan,
@@ -112,7 +115,9 @@ impl Preview {
                     _ => None,
                 })
                 .collect();
-            if let Some(category) = parts.first() {
+            // ملف يبقى في المجلد المختار نفسه (يُعاد تسميته فقط) يُحسب باسم "This folder"
+            let category = if parts.len() > 1 { parts.first().cloned() } else { Some(THIS_FOLDER.to_string()) };
+            if let Some(category) = category.as_ref() {
                 *per_category.entry(category.clone()).or_default() += 1;
                 // مجلد فرعي داخل مجلد الفئة (يحدث فقط للموسيقى) = مجلد فنان
                 if parts.len() > 2 && parts[1] != "Single Tracks" {
@@ -123,6 +128,9 @@ impl Preview {
         let summary = per_category
             .iter()
             .map(|(category, n)| {
+                if category == THIS_FOLDER {
+                    return format!("{}: {}", category, n);
+                }
                 let state = if plan.new_dirs.contains(&plan.source.join(category)) { "new" } else { "existing" };
                 match artist_folders.get(category).map_or(0, |s| s.len()) {
                     0 => format!("{} ({} folder): {}", category, state, n),
@@ -136,12 +144,15 @@ impl Preview {
             .join("   ·   ");
 
         let mut headline = format!(
-            "{} files will be moved{} into category folders inside the selected folder:",
-            plan.moves.len(),
-            if rename_files { " and renamed" } else { "" }
+            "{} will be moved{}.",
+            files(plan.moves.len()),
+            if rename_files { " or renamed" } else { "" }
         );
         if plan.in_place > 0 {
-            headline.push_str(&format!(" ({} already in the right place)", files(plan.in_place)));
+            headline.push_str(&format!(" {} already in the right place.", files(plan.in_place)));
+        }
+        if plan.kept_in_folders > 0 {
+            headline.push_str(&format!(" {} in your existing folders are left as they are.", files(plan.kept_in_folders)));
         }
         let rows = plan
             .moves
@@ -218,7 +229,12 @@ impl ArrayApp {
             Job::Planning(rx) => match poll(rx) {
                 None => return,
                 Some(Ok(plan)) if plan.moves.is_empty() => {
-                    self.status_message = if plan.in_place > 0 {
+                    self.status_message = if plan.kept_in_folders > 0 {
+                        format!(
+                            "Nothing to organize: the loose files are already in place and {} in your existing folders are left as they are.",
+                            files(plan.kept_in_folders)
+                        )
+                    } else if plan.in_place > 0 {
                         format!("This folder is already organized ({} in the right place).", files(plan.in_place))
                     } else {
                         "No files to organize in this folder.".to_string()
@@ -325,18 +341,18 @@ impl ArrayApp {
         self.status_message = "⏳ Restoring files... please wait".to_string();
     }
 
-    fn set_rename_files(&mut self, rename_files: bool) {
+    fn set_option(&mut self, change: impl Fn(&mut Options)) {
         // قراءة الملف ثم تعديل هذا الخيار فقط، حتى لا تضيع تعديلات المستخدم على الكلمات
         match self.storage.load_settings() {
             Ok(mut options) => {
-                options.rename_files = rename_files;
+                change(&mut options);
                 if let Err(err) = self.storage.save_settings(&options) {
                     self.status_message = format!("⚠ {}", err);
                 }
                 self.options = options;
             }
             Err(err) => {
-                self.options.rename_files = rename_files;
+                change(&mut self.options);
                 self.status_message = format!("⚠ {} This choice is used for now but not saved.", err);
             }
         }
@@ -386,7 +402,7 @@ impl ArrayApp {
                     .on_hover_text("Off: files keep their original names and are only sorted into folders.")
                     .changed()
                 {
-                    self.set_rename_files(rename);
+                    self.set_option(|o| o.rename_files = rename);
                 }
             });
             cols[1].with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
@@ -398,6 +414,21 @@ impl ArrayApp {
                     self.open_settings_file();
                 }
             });
+        });
+
+        ui.add_space(4.0);
+        ui.vertical_centered(|ui| {
+            let mut keep = self.options.keep_existing_folders;
+            if ui
+                .add_enabled(!busy, egui::Checkbox::new(&mut keep, "Keep my existing folders as they are"))
+                .on_hover_text(
+                    "On: files already inside subfolders are not moved or renamed; only loose files are organized \
+                     (they can still go into a matching existing folder).\nOff: all subfolders are emptied and rebuilt.",
+                )
+                .changed()
+            {
+                self.set_option(|o| o.keep_existing_folders = keep);
+            }
         });
 
         ui.add_space(10.0);

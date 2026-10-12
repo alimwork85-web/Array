@@ -8,7 +8,27 @@ use chrono::{DateTime, Local};
 use lofty::file::AudioFile;
 use lofty::probe::Probe;
 
-use crate::normalizer::normalize_arabic;
+use std::sync::LazyLock;
+
+use regex::Regex;
+
+use crate::normalizer::{normalize_arabic, to_western_digits};
+
+/// تاريخ ووقت داخل الاسم: "20260409_145348"، "2025-05-29 18.23.30"، "IMG_20240101_093000"
+static RE_NAME_DATE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:^|[^0-9])((?:19|20)[0-9]{2})[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12][0-9]|3[01])(?:[ _T-]?([01][0-9]|2[0-3])[-_.:]?([0-5][0-9])(?:[-_.:]?([0-5][0-9]))?)?(?:[^0-9]|$)").unwrap()
+});
+
+/// التاريخ والوقت المكتوبان في الاسم نفسه (غالباً وقت التصوير)، بصيغة "2026-04-09 14-53"
+fn date_from_name(name: &str) -> Option<String> {
+    let name = to_western_digits(name);
+    let c = RE_NAME_DATE.captures(&name)?;
+    let mut date = format!("{}-{}-{}", &c[1], &c[2], &c[3]);
+    if let (Some(h), Some(m)) = (c.get(4), c.get(5)) {
+        date.push_str(&format!(" {}-{}", h.as_str(), m.as_str()));
+    }
+    Some(date)
+}
 
 /// أسماء عامة لا تميّز الملف. ما بعد "=" هو النص الذي يصلح سياقاً للاسم الجديد (فارغ = لا يصلح)
 const PLACEHOLDERS: [(&str, &str); 18] = [
@@ -43,7 +63,9 @@ fn is_random_token(token: &str) -> bool {
     }
     let letters = token.chars().filter(|c| c.is_alphabetic()).count();
     let digits = token.chars().filter(|c| c.is_ascii_digit()).count();
-    let is_hex = token.len() >= 6 && token.chars().all(|c| c.is_ascii_hexdigit());
+    // سداسي عشري فيه أرقام وحروف (أجزاء UUID مثل "88aa" و"ab22")، أو طويل
+    let all_hex = token.chars().all(|c| c.is_ascii_hexdigit());
+    let is_hex = all_hex && (token.len() >= 6 || (token.len() >= 3 && letters > 0 && digits > 0));
     // حروف كبيرة وسط الكلمة بعد حروف صغيرة أكثر من مرة: خلط عشوائي للحالة
     let chars: Vec<char> = token.chars().collect();
     let case_jumps = chars.windows(2).filter(|w| w[0].is_lowercase() && w[1].is_uppercase()).count();
@@ -98,10 +120,14 @@ fn format_duration(d: Duration) -> String {
     if h > 0 { format!("{}h{:02}m{:02}s", h, m, s) } else { format!("{}m{:02}s", m, s) }
 }
 
-/// اسم جديد: "السياق - تاريخ التنزيل ووقته - المدة"، مثل "house lo - 2026-09-12 23-31 - 0m07s"
+/// اسم جديد: "السياق - التاريخ والوقت - المدة"، مثل "house lo - 2026-09-12 23-31 - 0m07s".
+/// التاريخ من الاسم القديم إن كان فيه (وقت التصوير)، وإلا وقت آخر تعديل للملف.
 pub fn generated_name(context: &str, path: &Path) -> String {
     let mut parts = vec![context.trim().to_string()];
-    if let Ok(modified) = std::fs::metadata(path).and_then(|m| m.modified()) {
+    let old_name = path.file_stem().unwrap_or_default().to_string_lossy();
+    if let Some(date) = date_from_name(&old_name) {
+        parts.push(date);
+    } else if let Ok(modified) = std::fs::metadata(path).and_then(|m| m.modified()) {
         let local: DateTime<Local> = modified.into();
         parts.push(local.format("%Y-%m-%d %H-%M").to_string());
     }
@@ -128,6 +154,10 @@ mod tests {
             "-H7Wb7eOxN-mx6trNVI2 EBsCu2zNMG O jxX 5WG4u-bW1 0zWrVYdMVxShmi1YheykpznRs1-faAlke0QjV",
             "09-04 - تسجيل صوتي",
             "a",
+            "03b510f8-88aa-4487-ab22-bd6b93174921",
+            "88462d6e-60cf-42e5-beae-ebb71ed18c4f",
+            "133649_466985853345771_200500525",
+            "٢٠٢٦٠٤٠٩_١٤٥٣٤٨",
         ] {
             assert!(is_junk_name(junk), "{junk} should be junk");
         }
@@ -157,6 +187,16 @@ mod tests {
     fn placeholder_text_can_be_context() {
         assert_eq!(placeholder_context("09-04 - تسجيل صوتي").as_deref(), Some("تسجيل صوتي"));
         assert_eq!(placeholder_context("YouTube (1)"), None);
+    }
+
+    #[test]
+    fn dates_are_read_from_the_old_name() {
+        assert_eq!(date_from_name("٢٠٢٦٠٤٠٩_١٤٥٣٤٨ [IMA-da4c15b4]").as_deref(), Some("2026-04-09 14-53"));
+        assert_eq!(date_from_name("20260519_122023").as_deref(), Some("2026-05-19 12-20"));
+        assert_eq!(date_from_name("IMG_20240101_093000").as_deref(), Some("2024-01-01 09-30"));
+        assert_eq!(date_from_name("صورة - 2026-07-28").as_deref(), Some("2026-07-28"));
+        // أرقام فيسبوك الطويلة ليست تاريخاً
+        assert_eq!(date_from_name("133649_466985853345771_200500525"), None);
     }
 
     #[test]
