@@ -4,22 +4,27 @@ mod normalizer;
 mod organizer;
 mod rtl;
 mod safety;
+mod storage;
 
 use eframe::egui;
-use organizer::OrganizerEngine;
+use organizer::{Options, OrganizerEngine, Plan};
 use rfd::FileDialog;
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
+use storage::{Storage, UndoLog};
 
 fn main() -> eframe::Result<()> {
     let icon = load_app_icon();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([540.0, 320.0])
-            .with_resizable(false)
+            .with_inner_size([760.0, 560.0])
+            .with_min_inner_size([620.0, 460.0])
             .with_icon(Arc::new(icon)),
         ..Default::default()
     };
@@ -29,7 +34,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             rtl::install_arabic_font(&cc.egui_ctx);
-            Box::new(ArrayApp::default())
+            Box::new(ArrayApp::new(Storage::default_location()))
         }),
     )
 }
@@ -48,8 +53,14 @@ fn load_app_icon() -> egui::IconData {
 
 /// عمل جارٍ في الخلفية حتى لا تتجمد النافذة مع المجلدات الكبيرة
 enum Job {
-    Counting(Receiver<Result<usize, String>>),
-    Organizing(Receiver<Result<String, String>>),
+    Planning(Receiver<Result<Plan, String>>),
+    /// تنظيم أو تراجع، مع عدّاد الملفات المنجزة لشريط التقدم
+    Moving {
+        label: &'static str,
+        rx: Receiver<Result<String, String>>,
+        progress: Arc<AtomicUsize>,
+        total: usize,
+    },
 }
 
 fn spawn_job<T: Send + 'static>(ctx: &egui::Context, work: impl FnOnce() -> T + Send + 'static) -> Receiver<T> {
@@ -66,121 +77,456 @@ fn spawn_job<T: Send + 'static>(ctx: &egui::Context, work: impl FnOnce() -> T + 
 fn poll<T>(rx: &Receiver<Result<T, String>>) -> Option<Result<T, String>> {
     match rx.try_recv() {
         Ok(result) => Some(result),
-        Err(TryRecvError::Disconnected) => Some(Err("organizing stopped unexpectedly".to_string())),
+        Err(TryRecvError::Disconnected) => Some(Err("the operation stopped unexpectedly".to_string())),
         Err(TryRecvError::Empty) => None,
     }
 }
 
+/// خطة جاهزة للعرض: النصوص محسوبة مرة واحدة وليس في كل إطار
+struct Preview {
+    plan: Plan,
+    headline: String,
+    summary: String,
+    rows: Vec<(String, String)>,
+}
+
+impl Preview {
+    fn new(plan: Plan, rename_files: bool) -> Self {
+        let relative = |path: &Path, base: &Path| path.strip_prefix(base).unwrap_or(path).display().to_string();
+
+        // عدد الملفات لكل فئة، وعدد مجلدات الفنانين داخل Music
+        let mut per_category: BTreeMap<String, usize> = BTreeMap::new();
+        let mut music_folders: BTreeMap<String, ()> = BTreeMap::new();
+        for m in &plan.moves {
+            let parts: Vec<String> = m
+                .to
+                .strip_prefix(&plan.output_base)
+                .unwrap_or(&m.to)
+                .components()
+                .filter_map(|c| match c {
+                    Component::Normal(n) => Some(n.to_string_lossy().to_string()),
+                    _ => None,
+                })
+                .collect();
+            if let Some(category) = parts.first() {
+                *per_category.entry(category.clone()).or_default() += 1;
+                if category == "Music" && parts.len() > 2 && parts[1] != "Single Tracks" {
+                    music_folders.insert(parts[1].clone(), ());
+                }
+            }
+        }
+        let summary = per_category
+            .iter()
+            .map(|(category, n)| {
+                if category == "Music" && !music_folders.is_empty() {
+                    let folders = music_folders.len();
+                    format!("{}: {} ({} artist folder{})", category, n, folders, if folders == 1 { "" } else { "s" })
+                } else {
+                    format!("{}: {}", category, n)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("   ·   ");
+
+        let headline = format!(
+            "{} files will be moved{} into \"Array_Organized\":",
+            plan.moves.len(),
+            if rename_files { " and renamed" } else { "" }
+        );
+        let rows = plan
+            .moves
+            .iter()
+            .map(|m| (rtl::for_display(&relative(&m.from, &plan.source)), rtl::for_display(&relative(&m.to, &plan.output_base))))
+            .collect();
+
+        Self { plan, headline, summary, rows }
+    }
+}
+
 struct ArrayApp {
+    storage: Storage,
+    options: Options,
     selected_path: Option<PathBuf>,
     status_message: String,
     job: Option<Job>,
-    /// عدد الملفات بانتظار تأكيد المستخدم قبل النقل
-    confirm_count: Option<usize>,
-}
-
-impl Default for ArrayApp {
-    fn default() -> Self {
-        Self {
-            selected_path: None,
-            status_message: "Please select a folder to organize...".to_string(),
-            job: None,
-            confirm_count: None,
-        }
-    }
+    preview: Option<Preview>,
+    /// عدد الملفات التي يمكن إرجاعها (None إذا لا يوجد ما يُتراجع عنه)
+    undo_count: Option<usize>,
+    /// عدد السجلات في ملف التراجع (لشريط التقدم)
+    undo_entries: usize,
+    confirm_undo: bool,
 }
 
 impl ArrayApp {
-    fn poll_job(&mut self) {
-        let finished = match &self.job {
-            Some(Job::Counting(rx)) => poll(rx).map(|result| match result {
-                Ok(0) => "No files to organize in this folder.".to_string(),
-                Ok(n) => {
-                    self.confirm_count = Some(n);
-                    "Waiting for confirmation...".to_string()
-                }
-                Err(err) => format!("❌ Error: {}", err),
-            }),
-            Some(Job::Organizing(rx)) => poll(rx).map(|result| match result {
-                Ok(msg) => msg,
-                Err(err) => format!("❌ Error: {}", err),
-            }),
-            None => None,
+    fn new(storage: Storage) -> Self {
+        let (options, status_message) = match storage.load_settings() {
+            Ok(options) => (options, "Please select a folder to organize...".to_string()),
+            Err(err) => (Options::default(), format!("⚠ {}", err)),
         };
-        if let Some(msg) = finished {
-            self.status_message = msg;
-            self.job = None;
+        let mut app = Self {
+            storage,
+            options,
+            selected_path: None,
+            status_message,
+            job: None,
+            preview: None,
+            undo_count: None,
+            undo_entries: 0,
+            confirm_undo: false,
+        };
+        app.refresh_undo();
+        app
+    }
+
+    fn refresh_undo(&mut self) {
+        // بعد تنظيم توقف في المنتصف يحتوي السجل ملفات لم تُنقل، فلا تُحسب
+        let (entries, movable) = match self.storage.load_undo() {
+            Ok(Some(log)) => (log.moves.len(), log.moves.iter().filter(|m| m.to.exists()).count()),
+            Ok(None) => (0, 0),
+            Err(err) => {
+                self.status_message = format!("⚠ {}", err);
+                (0, 0)
+            }
+        };
+        self.undo_entries = entries;
+        self.undo_count = Some(movable).filter(|&n| n > 0);
+    }
+
+    fn busy(&self) -> bool {
+        self.job.is_some() || self.preview.is_some() || self.confirm_undo
+    }
+
+    fn poll_job(&mut self) {
+        let Some(job) = &self.job else { return };
+        match job {
+            Job::Planning(rx) => match poll(rx) {
+                None => return,
+                Some(Ok(plan)) if plan.moves.is_empty() => {
+                    self.status_message = "No files to organize in this folder.".to_string();
+                }
+                Some(Ok(plan)) => {
+                    self.status_message = "Review where each file will go, then confirm.".to_string();
+                    self.preview = Some(Preview::new(plan, self.options.rename_files));
+                }
+                Some(Err(err)) => self.status_message = format!("❌ Error: {}", err),
+            },
+            Job::Moving { rx, .. } => match poll(rx) {
+                None => return,
+                Some(Ok(msg)) => self.status_message = msg,
+                Some(Err(err)) => self.status_message = format!("❌ Error: {}", err),
+            },
+        }
+        self.job = None;
+        self.refresh_undo();
+    }
+
+    /// قراءة الإعدادات من جديد لأن المستخدم قد يكون عدّلها في Notepad
+    fn reload_settings(&mut self) {
+        match self.storage.load_settings() {
+            Ok(options) => self.options = options,
+            Err(err) => self.status_message = format!("⚠ {}", err),
         }
     }
 
-    fn show_confirmation(&mut self, ctx: &egui::Context) {
-        let (Some(count), Some(path)) = (self.confirm_count, self.selected_path.clone()) else {
-            return;
+    fn start_planning(&mut self, ctx: &egui::Context, path: PathBuf) {
+        self.reload_settings();
+        let options = self.options.clone();
+        self.job = Some(Job::Planning(spawn_job(ctx, move || OrganizerEngine::plan(&path, &options))));
+        self.status_message = "⏳ Scanning files...".to_string();
+    }
+
+    fn start_organizing(&mut self, ctx: &egui::Context, plan: Plan) {
+        let progress = Arc::new(AtomicUsize::new(0));
+        let total = plan.moves.len();
+        let storage = self.storage.clone();
+        let counter = progress.clone();
+        let rx = spawn_job(ctx, move || {
+            // السجل يُحفظ قبل نقل أي ملف؛ إن تعذّر حفظه لا يُنقل شيء
+            storage
+                .save_undo(&UndoLog { source: plan.source.clone(), moves: plan.moves.clone() })
+                .map_err(|e| format!("{} Nothing was moved.", e))?;
+            let result = OrganizerEngine::execute(&plan, &counter);
+            // السجل يحتفظ فقط بما نُقل فعلاً
+            let saved = if result.done.is_empty() {
+                storage.clear_undo()
+            } else {
+                storage.save_undo(&UndoLog { source: plan.source.clone(), moves: result.done.clone() })
+            };
+
+            let mut msg = format!("✔ Moved {} files into {}", result.done.len(), plan.output_base.display());
+            if !result.failed.is_empty() {
+                msg.push_str(&format!(
+                    "\n⚠ {} files could not be moved (in use, access denied, or a file with the same name appeared) and were left in place.",
+                    result.failed.len()
+                ));
+            }
+            if let Err(e) = saved {
+                msg.push_str(&format!("\n⚠ {}", e));
+            }
+            Ok(msg)
+        });
+        self.job = Some(Job::Moving { label: "Organizing", rx, progress, total });
+        self.status_message = "⏳ Organizing... please wait".to_string();
+    }
+
+    fn start_undo(&mut self, ctx: &egui::Context) {
+        let progress = Arc::new(AtomicUsize::new(0));
+        let total = self.undo_entries;
+        let storage = self.storage.clone();
+        let counter = progress.clone();
+        let rx = spawn_job(ctx, move || {
+            let Some(log) = storage.load_undo()? else {
+                return Err("There is nothing to undo.".to_string());
+            };
+            let result = OrganizerEngine::undo(&log.moves, &log.source, &counter);
+            // الملفات التي لم تُرجع تبقى في السجل لإعادة المحاولة
+            if result.failed.is_empty() {
+                storage.clear_undo()?;
+            } else {
+                storage.save_undo(&UndoLog { source: log.source.clone(), moves: result.failed.clone() })?;
+            }
+
+            let mut msg = format!("↩ Restored {} files to their original places in {}", result.done.len(), log.source.display());
+            if !result.failed.is_empty() {
+                msg.push_str(&format!(
+                    "\n⚠ {} files could not be restored (moved, renamed, in use, or a new file has the same name). Press Undo again to retry them.",
+                    result.failed.len()
+                ));
+            }
+            Ok(msg)
+        });
+        self.job = Some(Job::Moving { label: "Restoring", rx, progress, total });
+        self.status_message = "⏳ Restoring files... please wait".to_string();
+    }
+
+    fn set_rename_files(&mut self, rename_files: bool) {
+        // قراءة الملف ثم تعديل هذا الخيار فقط، حتى لا تضيع تعديلات المستخدم على الكلمات
+        match self.storage.load_settings() {
+            Ok(mut options) => {
+                options.rename_files = rename_files;
+                if let Err(err) = self.storage.save_settings(&options) {
+                    self.status_message = format!("⚠ {}", err);
+                }
+                self.options = options;
+            }
+            Err(err) => {
+                self.options.rename_files = rename_files;
+                self.status_message = format!("⚠ {} This choice is used for now but not saved.", err);
+            }
+        }
+    }
+
+    fn open_settings_file(&mut self) {
+        let path = self.storage.settings_path();
+        if !path.exists() {
+            if let Err(err) = self.storage.save_settings(&self.options) {
+                self.status_message = format!("⚠ {}", err);
+                return;
+            }
+        }
+        self.status_message = match std::process::Command::new("notepad").arg(&path).spawn() {
+            Ok(_) => "Edit \"speaker_keywords\" in Notepad and save. The new words are used from the next preview.".to_string(),
+            Err(err) => format!("⚠ Could not open {}: {}", path.display(), err),
         };
-        egui::Window::new("Confirm")
+    }
+
+    fn show_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let busy = self.busy();
+
+        ui.vertical_centered(|ui| {
+            ui.add_space(12.0);
+            ui.heading("🚀 Array File Organizer");
+            ui.label("Smart Media & Document Organization Engine");
+            ui.add_space(14.0);
+
+            if ui.add_enabled(!busy, egui::Button::new("📁 Select Folder")).clicked() {
+                if let Some(path) = FileDialog::new().pick_folder() {
+                    self.selected_path = Some(path);
+                    self.status_message = "Ready. Press Preview to see where each file will go.".to_string();
+                }
+            }
+            if let Some(path) = &self.selected_path {
+                ui.add_space(4.0);
+                ui.label(rtl::for_display(&format!("Selected: {}", path.display())));
+            }
+        });
+
+        ui.add_space(10.0);
+        ui.columns(2, |cols| {
+            cols[0].with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                let mut rename = self.options.rename_files;
+                if ui
+                    .add_enabled(!busy, egui::Checkbox::new(&mut rename, "Clean up file names"))
+                    .on_hover_text("Off: files keep their original names and are only sorted into folders.")
+                    .changed()
+                {
+                    self.set_rename_files(rename);
+                }
+            });
+            cols[1].with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                if ui
+                    .add_enabled(!busy, egui::Button::new("⚙ Edit speaker keywords"))
+                    .on_hover_text("Words that mark the speaker at the end of a file name, e.g. \"Lecture - Sheikh X\".")
+                    .clicked()
+                {
+                    self.open_settings_file();
+                }
+            });
+        });
+
+        ui.add_space(10.0);
+        ui.columns(2, |cols| {
+            cols[0].with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                let can_start = !busy && self.selected_path.is_some();
+                if ui.add_enabled(can_start, egui::Button::new("🔍 Preview & Organize")).clicked() {
+                    if let Some(path) = self.selected_path.clone() {
+                        self.start_planning(ctx, path);
+                    }
+                }
+            });
+            cols[1].with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                let label = match self.undo_count {
+                    Some(n) => format!("↩ Undo last organize ({} files)", n),
+                    None => "↩ Undo last organize".to_string(),
+                };
+                if ui.add_enabled(!busy && self.undo_count.is_some(), egui::Button::new(label)).clicked() {
+                    self.confirm_undo = true;
+                }
+            });
+        });
+    }
+
+    fn show_progress(&self, ui: &mut egui::Ui) {
+        match &self.job {
+            Some(Job::Planning(_)) => {
+                ui.add_space(16.0);
+                ui.vertical_centered(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.add_space((ui.available_width() - 160.0).max(0.0) / 2.0);
+                        ui.spinner();
+                        ui.label("Scanning files...");
+                    });
+                });
+            }
+            Some(Job::Moving { label, progress, total, .. }) => {
+                let done = progress.load(Ordering::Relaxed);
+                let fraction = if *total == 0 { 1.0 } else { done as f32 / *total as f32 };
+                ui.add_space(16.0);
+                ui.add(egui::ProgressBar::new(fraction).text(format!("{}: {} / {} files", label, done, total)));
+            }
+            None => {}
+        }
+    }
+
+    fn show_preview(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let Some(preview) = &self.preview else { return };
+        let mut decision: Option<bool> = None;
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.label(egui::RichText::new(&preview.headline).strong());
+        ui.label(rtl::for_display(&preview.summary));
+        ui.add_space(4.0);
+
+        let row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
+        let table_height = (ui.available_height() - 44.0).max(row_height * 3.0);
+        egui::ScrollArea::vertical()
+            .max_height(table_height)
+            .auto_shrink([false, false])
+            .show_rows(ui, row_height, preview.rows.len(), |ui, range| {
+                let column = ((ui.available_width() - 30.0) / 2.0).max(50.0);
+                for (from, to) in &preview.rows[range] {
+                    ui.horizontal(|ui| {
+                        table_cell(ui, column, row_height, from);
+                        ui.label("→");
+                        table_cell(ui, column, row_height, to);
+                    });
+                }
+            });
+
+        ui.add_space(6.0);
+        ui.columns(2, |cols| {
+            cols[0].with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                if ui.button(format!("✔ Organize {} files", preview.rows.len())).clicked() {
+                    decision = Some(true);
+                }
+            });
+            cols[1].with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                if ui.button("✖ Cancel").clicked() {
+                    decision = Some(false);
+                }
+            });
+        });
+
+        match decision {
+            Some(true) => {
+                if let Some(preview) = self.preview.take() {
+                    self.start_organizing(ctx, preview.plan);
+                }
+            }
+            Some(false) => {
+                self.preview = None;
+                self.status_message = "Cancelled. No files were moved.".to_string();
+            }
+            None => {}
+        }
+    }
+
+    fn show_undo_confirmation(&mut self, ctx: &egui::Context) {
+        if !self.confirm_undo {
+            return;
+        }
+        let count = self.undo_count.unwrap_or(0);
+        egui::Window::new("Undo")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.label(format!("{} files will be moved and renamed into \"Array_Organized\".", count));
-                ui.label("This cannot be undone. Continue?");
+                ui.label(format!("Move {} files back to where they were before the last organize?", count));
+                ui.label("Files that were changed or replaced since then are left alone.");
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button("✔ Yes, organize").clicked() {
-                        self.confirm_count = None;
-                        self.job = Some(Job::Organizing(spawn_job(ctx, move || OrganizerEngine::process_directory(&path))));
-                        self.status_message = "⏳ Organizing... please wait".to_string();
+                    if ui.button("↩ Yes, undo").clicked() {
+                        self.confirm_undo = false;
+                        self.start_undo(ctx);
                     }
                     if ui.button("✖ Cancel").clicked() {
-                        self.confirm_count = None;
-                        self.status_message = "Cancelled. No files were moved.".to_string();
+                        self.confirm_undo = false;
                     }
                 });
             });
     }
 }
 
+/// خلية بعرض ثابت؛ الاسم الطويل يُختصر ويظهر كاملاً عند المرور عليه
+fn table_cell(ui: &mut egui::Ui, width: f32, height: f32, text: &str) {
+    ui.allocate_ui_with_layout(egui::vec2(width, height), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.set_min_width(width);
+        ui.add(egui::Label::new(text).truncate(true)).on_hover_text(text);
+    });
+}
+
 impl eframe::App for ArrayApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_job();
-        let busy = self.job.is_some() || self.confirm_count.is_some();
+        if self.job.is_some() {
+            // تحديث شريط التقدم أثناء العمل
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(20.0);
-                ui.heading("🚀 Array File Organizer");
-                ui.label("Smart Media & Document Organization Engine");
-                ui.add_space(20.0);
-
-                if ui.add_enabled(!busy, egui::Button::new("📁 Select Folder")).clicked() {
-                    if let Some(path) = FileDialog::new().pick_folder() {
-                        self.selected_path = Some(path);
-                        self.status_message = "Ready to start organizing...".to_string();
-                    }
-                }
-
-                ui.add_space(10.0);
-
-                if let Some(ref path) = self.selected_path {
-                    ui.label(rtl::for_display(&format!("Selected: {}", path.display())));
-                    ui.add_space(15.0);
-
-                    if ui.add_enabled(!busy, egui::Button::new("⚡ Start Organizing Now")).clicked() {
-                        // عدّ الملفات أولاً ثم طلب التأكيد قبل أي نقل
-                        let path = path.clone();
-                        self.job = Some(Job::Counting(spawn_job(ctx, move || OrganizerEngine::count_files(&path))));
-                        self.status_message = "⏳ Counting files...".to_string();
-                    }
-                }
-
-                ui.add_space(20.0);
-                ui.separator();
-                ui.add_space(10.0);
-                ui.label(rtl::for_display(&self.status_message));
-            });
+        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+            ui.add_space(6.0);
+            ui.vertical_centered(|ui| ui.label(rtl::for_display(&self.status_message)));
+            ui.add_space(6.0);
         });
 
-        self.show_confirmation(ctx);
+        egui::CentralPanel::default().show(ctx, |ui| {
+            self.show_controls(ui, ctx);
+            self.show_progress(ui);
+            self.show_preview(ui, ctx);
+        });
+
+        self.show_undo_confirmation(ctx);
     }
 }
 
