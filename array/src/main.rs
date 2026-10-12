@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::thread;
 
 fn main() -> eframe::Result<()> {
-    let icon = create_app_icon();
+    let icon = load_app_icon();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -34,50 +34,15 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-/// رسم أيقونة عالي الدقة (64x64) لمجلد أنيق لضمان الظهور في شريط المهام
-fn create_app_icon() -> egui::IconData {
-    let size = 64;
-    let mut rgba = vec![0u8; size * size * 4];
-
-    for y in 0..size {
-        for x in 0..size {
-            let idx = (y * size + x) * 4;
-            let dx = x as f32 - 31.5;
-            let dy = y as f32 - 31.5;
-            let dist_sq = dx * dx + dy * dy;
-
-            // خلفية دائرة دائرية بحواف متناسقة
-            if dist_sq <= 29.0 * 29.0 {
-                // رسم مجلد برتقالي واصل في المنتصف
-                if y >= 20 && y <= 46 && x >= 14 && x <= 50 {
-                    if y <= 25 && x > 30 {
-                        // الخلفية خلف لسان المجلد
-                        rgba[idx] = 0x15;
-                        rgba[idx + 1] = 0x18;
-                        rgba[idx + 2] = 0x21;
-                        rgba[idx + 3] = 0xFF;
-                    } else {
-                        // ألوان المجلد البرتقالي الذهبي
-                        rgba[idx] = 0xFF;
-                        rgba[idx + 1] = 0x98;
-                        rgba[idx + 2] = 0x00;
-                        rgba[idx + 3] = 0xFF;
-                    }
-                } else {
-                    // لون خلفية الدائرة الكحلي
-                    rgba[idx] = 0x15;
-                    rgba[idx + 1] = 0x18;
-                    rgba[idx + 2] = 0x21;
-                    rgba[idx + 3] = 0xFF;
-                }
-            }
+/// أيقونة النافذة وشريط المهام من نفس ملف Array.ico المضمّن في ملف EXE
+fn load_app_icon() -> egui::IconData {
+    match image::load_from_memory_with_format(include_bytes!("../Array.ico"), image::ImageFormat::Ico) {
+        Ok(img) => {
+            let rgba = img.into_rgba8();
+            let (width, height) = rgba.dimensions();
+            egui::IconData { rgba: rgba.into_raw(), width, height }
         }
-    }
-
-    egui::IconData {
-        rgba,
-        width: size as u32,
-        height: size as u32,
+        Err(_) => egui::IconData::default(),
     }
 }
 
@@ -216,5 +181,15 @@ impl eframe::App for ArrayApp {
         });
 
         self.show_confirmation(ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn app_icon_decodes() {
+        let icon = super::load_app_icon();
+        assert!(icon.width >= 32 && icon.height >= 32);
+        assert_eq!(icon.rgba.len(), (icon.width * icon.height * 4) as usize);
     }
 }
