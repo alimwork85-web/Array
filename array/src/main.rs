@@ -108,7 +108,7 @@ impl eframe::App for ArrayApp {
                 ui.add_space(10.0);
 
                 if let Some(ref path) = self.selected_path {
-                    ui.label(format!("Selected: {:?}", path));
+                    ui.label(format!("Selected: {}", path.display()));
                     ui.add_space(15.0);
 
                     if ui.button("⚡ Start Organizing Now").clicked() {

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use lofty::file::TaggedFileExt;
 use lofty::probe::Probe;
 use lofty::tag::Accessor;
@@ -9,6 +10,12 @@ use walkdir::WalkDir;
 
 use crate::normalizer::{normalize_arabic, sanitize_filename};
 use crate::safety::SafetyChecker;
+
+// تُجمَّع التعبيرات مرة واحدة بدلاً من كل ملف
+static RE_BRACKETS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[.*?\]|\(.*?\)|_|\bAUD-\w+\b").unwrap());
+static RE_PIPES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\|+").unwrap());
+static RE_SPACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
+static RE_EPISODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(الحلقة|حلقة|part|ep|episode)\s*\d+").unwrap());
 
 pub enum FileType {
     Audio,
@@ -43,13 +50,9 @@ impl OrganizerEngine {
 
     fn clean_string(input: &str) -> String {
         // حذف الأقواس، الأكواد العشوائية [AUD-...], والأرقام التعريفية بين الأقواس
-        let re_brackets = Regex::new(r"\[.*?\]|\(.*?\)|_|\bAUD-\w+\b").unwrap();
-        let re_pipes = Regex::new(r"\|+").unwrap();
-        let re_spaces = Regex::new(r"\s+").unwrap();
-
-        let mut cleaned = re_brackets.replace_all(input, " ").to_string();
-        cleaned = re_pipes.replace_all(&cleaned, " ").to_string();
-        cleaned = re_spaces.replace_all(&cleaned, " ").to_string();
+        let mut cleaned = RE_BRACKETS.replace_all(input, " ").to_string();
+        cleaned = RE_PIPES.replace_all(&cleaned, " ").to_string();
+        cleaned = RE_SPACES.replace_all(&cleaned, " ").to_string();
 
         sanitize_filename(&cleaned)
     }
@@ -61,8 +64,7 @@ impl OrganizerEngine {
 
     /// كشف السلاسل والحلقات (مثل: الحلقة 19، حلقة 20...)
     fn is_episode(text: &str) -> bool {
-        let re_ep = Regex::new(r"(?i)\b(الحلقة|حلقة|part|ep|episode)\s*\d+").unwrap();
-        re_ep.is_match(text) || text.starts_with("الحلقة") || text.starts_with("حلقة")
+        RE_EPISODE.is_match(text) || text.starts_with("الحلقة") || text.starts_with("حلقة")
     }
 
     /// استخراج المجموعات والسلاسل الذكي
@@ -175,43 +177,22 @@ impl OrganizerEngine {
                                 extension: ext_lower,
                             });
                         }
-                        FileType::Image => {
-                            raw_files.push(RawFileInfo {
-                                path: path.to_path_buf(),
-                                category: "Pictures".to_string(),
-                                raw_artist_or_group: "General".to_string(),
-                                clean_title: Self::clean_string(&stem),
-                                extension: ext_lower,
-                            });
-                        }
-                        FileType::Video => {
-                            raw_files.push(RawFileInfo {
-                                path: path.to_path_buf(),
-                                category: "Videos".to_string(),
-                                raw_artist_or_group: "General".to_string(),
-                                clean_title: Self::clean_string(&stem),
-                                extension: ext_lower,
-                            });
-                        }
-                        FileType::Document => {
-                            raw_files.push(RawFileInfo {
-                                path: path.to_path_buf(),
-                                category: "Documents".to_string(),
-                                raw_artist_or_group: "General".to_string(),
-                                clean_title: Self::clean_string(&stem),
-                                extension: ext_lower,
-                            });
-                        }
-                        FileType::Archive => {
-                            raw_files.push(RawFileInfo {
-                                path: path.to_path_buf(),
-                                category: "Archives".to_string(),
-                                raw_artist_or_group: "General".to_string(),
-                                clean_title: Self::clean_string(&stem),
-                                extension: ext_lower,
-                            });
-                        }
                         FileType::Other => {}
+                        other => {
+                            let category = match other {
+                                FileType::Image => "Pictures",
+                                FileType::Video => "Videos",
+                                FileType::Document => "Documents",
+                                _ => "Archives",
+                            };
+                            raw_files.push(RawFileInfo {
+                                path: path.to_path_buf(),
+                                category: category.to_string(),
+                                raw_artist_or_group: "General".to_string(),
+                                clean_title: Self::clean_string(&stem),
+                                extension: ext_lower,
+                            });
+                        }
                     }
                 }
             }
