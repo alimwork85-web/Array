@@ -26,17 +26,50 @@ fn has_arabic(text: &str) -> bool {
 }
 
 /// egui لا يصل الحروف العربية ولا يرتبها من اليمين لليسار، فنحوّل النص إلى أشكال
-/// الحروف المتصلة ثم نرتبه بصرياً. الاتجاه الأساسي يسار لليمين لأن الواجهة والمسارات إنجليزية.
+/// الحروف المتصلة ثم نرتبه بصرياً.
+/// كل جزء بين \ يُعالج وحده بحيث تبقى أجزاء المسار بترتيبها من اليسار لليمين،
+/// واتجاه كل جزء يُحدد من أول حرف فيه (الاسم العربي يُقرأ من اليمين).
 pub fn for_display(text: &str) -> String {
     if !has_arabic(text) {
         return text.to_string();
     }
-    let shaped = ar_reshaper::reshape_line(text);
-    let bidi = BidiInfo::new(&shaped, Some(Level::ltr()));
-    bidi.paragraphs
-        .iter()
-        .map(|para| bidi.reorder_line(para, para.range.clone()).into_owned())
-        .collect()
+    text.split('\\').map(shape_segment).collect::<Vec<_>>().join("\\")
+}
+
+fn shape_segment(segment: &str) -> String {
+    if !has_arabic(segment) {
+        return segment.to_string();
+    }
+    let shaped = ar_reshaper::reshape_line(segment);
+    let bidi = BidiInfo::new(&shaped, None::<Level>);
+    let mut out = String::with_capacity(shaped.len());
+    for para in &bidi.paragraphs {
+        let (levels, runs) = bidi.visual_runs(para, para.range.clone());
+        for run in runs {
+            let text = &shaped[run.clone()];
+            if levels[run.start].is_rtl() {
+                // عكس المقطع ومرآة الأقواس، لأن egui يرسم الحروف كما هي بلا مرآة
+                out.extend(text.chars().rev().map(mirror));
+            } else {
+                out.push_str(text);
+            }
+        }
+    }
+    out
+}
+
+fn mirror(c: char) -> char {
+    match c {
+        '(' => ')',
+        ')' => '(',
+        '[' => ']',
+        ']' => '[',
+        '{' => '}',
+        '}' => '{',
+        '<' => '>',
+        '>' => '<',
+        _ => c,
+    }
 }
 
 #[cfg(test)]
@@ -61,5 +94,16 @@ mod tests {
     fn path_keeps_ltr_order_around_arabic() {
         let shown = for_display("D:\\موسيقى\\a");
         assert!(shown.starts_with("D:\\") && shown.ends_with("\\a"), "{shown:?}");
+    }
+
+    #[test]
+    fn arabic_path_parts_keep_their_order() {
+        let first = for_display("موسيقى");
+        let second = for_display("عربي");
+        let shown = for_display("D:\\موسيقى\\عربي (1).mp3");
+        assert!(shown.starts_with(&format!("D:\\{}\\", first)), "{shown:?}");
+        // الجزء الأخير يُقرأ من اليمين: الاسم ثم (1) ثم الامتداد
+        assert!(shown.ends_with(&second), "{shown:?}");
+        assert!(shown.contains("mp3.(1)"), "{shown:?}");
     }
 }
