@@ -122,11 +122,15 @@ impl OrganizerEngine {
         if src == dst {
             return Ok(());
         }
-        if let Err(_) = fs::rename(src, dst) {
-            fs::copy(src, dst)?;
-            fs::remove_file(src)?;
+        if fs::rename(src, dst).is_ok() {
+            return Ok(());
         }
-        Ok(())
+        // النسخ ثم الحذف؛ عند أي فشل نحذف النسخة حتى لا يبقى ملف ناقص أو مكرر
+        let result = fs::copy(src, dst).and_then(|_| fs::remove_file(src));
+        if result.is_err() {
+            let _ = fs::remove_file(dst);
+        }
+        result
     }
 
     fn remove_empty_dirs(dir: &Path, skip_dir: &Path) {
@@ -202,11 +206,15 @@ impl OrganizerEngine {
             }
         }
 
-        let count = raw_files.len();
-        Self::organize_files(raw_files, &output_base)?;
+        let (moved, failed) = Self::organize_files(raw_files, &output_base)?;
         Self::remove_empty_dirs(source_path, &output_base);
 
-        Ok(format!("Successfully moved and organized {} files into {:?}", count, output_base))
+        let mut msg = format!("Successfully moved and organized {} files into {}", moved, output_base.display());
+        if failed > 0 {
+            msg.push_str(&format!("
+⚠ {} files could not be moved (in use or access denied) and were left in place.", failed));
+        }
+        Ok(msg)
     }
 
     fn extract_audio_info(file_path: &Path) -> (String, String) {
@@ -244,7 +252,8 @@ impl OrganizerEngine {
         (artist, if clean_tit.is_empty() { "Audio Track".to_string() } else { clean_tit })
     }
 
-    fn organize_files(files: Vec<RawFileInfo>, output_base: &Path) -> Result<(), String> {
+    /// يرجع (عدد الملفات المنقولة، عدد الملفات التي فشل نقلها)
+    fn organize_files(files: Vec<RawFileInfo>, output_base: &Path) -> Result<(usize, usize), String> {
         struct ProcessedItem {
             file: RawFileInfo,
             group_display_name: String,
@@ -254,6 +263,7 @@ impl OrganizerEngine {
         let mut processed_items: Vec<ProcessedItem> = Vec::new();
         let mut group_counts: HashMap<String, usize> = HashMap::new();
         let mut group_canonical_names: HashMap<String, String> = HashMap::new();
+        let (mut moved, mut failed) = (0, 0);
 
         for f in files {
             let (display_name, norm_key) = if f.category == "Music" {
@@ -306,10 +316,13 @@ impl OrganizerEngine {
                 counter += 1;
             }
 
-            let _ = Self::move_file(&f.path, &dest_path);
+            match Self::move_file(&f.path, &dest_path) {
+                Ok(()) => moved += 1,
+                Err(_) => failed += 1,
+            }
         }
 
-        Ok(())
+        Ok((moved, failed))
     }
 }
 #[cfg(test)]
@@ -401,6 +414,23 @@ mod tests {
         assert!(!root.join("a").exists() && !root.join("docs").exists());
         assert!(msg.contains('6'), "{msg}");
 
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_file_is_reported_and_left_in_place() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = temp_tree("locked", &["locked.pdf", "free.pdf"]);
+        // فتح الملف بدون مشاركة يمنع نقله وحذفه، كأنه مفتوح في برنامج آخر
+        let _lock = fs::OpenOptions::new().read(true).share_mode(0).open(root.join("locked.pdf")).unwrap();
+
+        let msg = OrganizerEngine::process_directory(&root).unwrap();
+
+        assert!(msg.contains("organized 1 files") && msg.contains("1 files could not be moved"), "{msg}");
+        assert!(root.join("locked.pdf").exists());
+        assert!(!root.join("Array_Organized/Documents/locked.pdf").exists());
+        drop(_lock);
         fs::remove_dir_all(&root).unwrap();
     }
 
