@@ -11,6 +11,7 @@ mod rtl;
 mod safety;
 mod storage;
 mod theme;
+mod video;
 
 use chrono::{DateTime, Local};
 use eframe::egui::{self, RichText};
@@ -676,6 +677,19 @@ impl ArrayApp {
         };
         if theme::toggle_row(ui, keep, &mut by_faces, tr("Sort loose photos into people folders by face", "رتّب الصور المتفرقة في مجلدات الأشخاص بالوجوه"), help) {
             self.set_option(|o| o.sort_by_faces = by_faces);
+        }
+        ui.add_space(8.0);
+        let mut by_year = self.options.videos_by_year;
+        let help = if detailed {
+            tr(
+                "The year comes from the name or the video itself. A video with the same name as a photo (Live Photo) stays next to it.",
+                "السنة من اسم المقطع أو من بيانات الفيديو نفسه. والفيديو الذي يحمل اسم صورة (صورة حية) يبقى بجانبها.",
+            )
+        } else {
+            tr("Live Photo videos stay next to their photo.", "مقاطع الصور الحية تبقى بجانب صورتها.")
+        };
+        if theme::toggle_row(ui, true, &mut by_year, tr("Sort loose videos into year folders", "رتّب الفيديو المتفرق في مجلدات السنوات"), help) {
+            self.set_option(|o| o.videos_by_year = by_year);
         }
         ui.add_space(8.0);
         let mut rename = self.options.rename_files;

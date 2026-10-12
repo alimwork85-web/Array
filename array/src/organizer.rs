@@ -16,6 +16,7 @@ use crate::grouping::{self, Assignment, Track, DEFAULT_AI_MARKERS};
 use crate::naming;
 use crate::normalizer::{fix_mojibake, looks_garbled, normalize_arabic, sanitize_filename, to_western_digits};
 use crate::safety::SafetyChecker;
+use crate::video;
 
 // تُجمَّع التعبيرات مرة واحدة بدلاً من كل ملف
 // ضوضاء الأسماء فقط: أكواد بين [ ] ومنها [AUD-...] المبتورة، عدادات التكرار (1)، وكلمات مثل (Official Video).
@@ -46,6 +47,8 @@ pub struct Options {
     pub keep_existing_folders: bool,
     /// ترتيب الصور المتفرقة في مجلدات الأشخاص الموجودة بالتعرّف على الوجوه (مع keep_existing_folders فقط)
     pub sort_by_faces: bool,
+    /// الفيديو المتفرق يُرتَّب في مجلدات سنوات داخل مجلد الفيديو (السنة من الاسم أو من بيانات الملف)
+    pub videos_by_year: bool,
     /// مظهر الواجهة: "system" يتبع ويندوز، أو "light" أو "dark"
     pub appearance: String,
     /// لغة الواجهة: "ar" (عربي، من اليمين لليسار) أو "en"
@@ -62,6 +65,7 @@ impl Default for Options {
             ai_markers: DEFAULT_AI_MARKERS.iter().map(|k| k.to_string()).collect(),
             keep_existing_folders: true,
             sort_by_faces: true,
+            videos_by_year: true,
             appearance: "system".to_string(),
             language: "ar".to_string(),
             welcome_seen: false,
@@ -522,6 +526,7 @@ impl OrganizerEngine {
             })
             .collect();
 
+        let targeted = Self::place_videos(targeted, &category_dirs["Videos"], options.videos_by_year);
         let (moves, in_place) = Self::plan_moves(targeted);
 
         // المجلدات غير الموجودة التي سيُنشئها التنفيذ
@@ -558,6 +563,34 @@ impl OrganizerEngine {
             face_note: face_sorting.note,
             skipped,
         })
+    }
+
+    /// الفيديو: مقطع "صورة حية" (بنفس اسم صورة في نفس المجلد) يتبع صورته بالمكان والاسم حتى يبقيا
+    /// زوجاً؛ وغيره يذهب إلى مجلد سنة تصويره إن عُرفت، وإلا يبقى في مجلد الفيديو نفسه
+    fn place_videos(mut targeted: Vec<(RawFileInfo, PathBuf)>, videos_dir: &Path, by_year: bool) -> Vec<(RawFileInfo, PathBuf)> {
+        let key = |path: &Path| -> Option<(PathBuf, String)> {
+            Some((path.parent()?.to_path_buf(), path.file_stem()?.to_string_lossy().to_lowercase()))
+        };
+        let photos: HashMap<(PathBuf, String), (PathBuf, String)> = targeted
+            .iter()
+            .filter(|(f, _)| f.category == "Pictures")
+            .filter_map(|(f, dir)| Some((key(&f.path)?, (dir.clone(), f.new_stem.clone()))))
+            .collect();
+        let existing_years: Vec<String> = fs::read_dir(videos_dir)
+            .map(|entries| entries.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).map(|e| e.file_name().to_string_lossy().to_string()).collect())
+            .unwrap_or_default();
+
+        for (f, dir) in targeted.iter_mut().filter(|(f, _)| f.category == "Videos") {
+            if let Some((photo_dir, photo_stem)) = key(&f.path).and_then(|k| photos.get(&k)) {
+                *dir = photo_dir.clone();
+                f.new_stem = photo_stem.clone();
+            } else if by_year {
+                if let Some(year) = video::year(&f.path) {
+                    *dir = videos_dir.join(video::year_folder_name(year, &existing_years));
+                }
+            }
+        }
+        targeted
     }
 
     /// يتعلّم وجوه أصحاب المجلدات الموجودة (Ali، Mom...) ثم يقترح لكل صورة متفرقة مجلد صاحبها.
@@ -864,6 +897,34 @@ pub(crate) mod tests {
         // اسمان يصبحان متطابقين بعد التنظيف يأخذان اسمين مختلفين داخل الخطة
         assert_ne!(plan.moves[0].to, plan.moves[1].to);
 
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn videos_go_to_their_year_and_live_photos_stay_with_their_photo() {
+        let root = temp_tree(
+            "videos",
+            &["20190704_101010.mp4", "VID-20210101-WA0001.mp4", "IMG_0548.HEIC", "IMG_0548.MOV", "trip.mp4", "Videos/فيديو 2019/old.mp4"],
+        );
+        let (_, result) = organize(&root, &Options::default());
+        assert!(result.failed.is_empty());
+        let files = tree(&root);
+        // مجلد السنة الموجود ("فيديو 2019") يُستخدم بدل إنشاء "2019"
+        assert!(files.contains(&"Videos/فيديو 2019/Video - 2019-07-04 10-10.mp4".to_string()), "{files:?}");
+        assert!(files.contains(&"Videos/2021/VID-20210101-WA0001.mp4".to_string()), "{files:?}");
+        // الصورة الحية: الفيديو بجانب صورته وبنفس اسمها
+        assert!(files.contains(&"Pictures/IMG 0548.heic".to_string()) && files.contains(&"Pictures/IMG 0548.mov".to_string()), "{files:?}");
+        // بلا تاريخ معروف: يبقى في مجلد الفيديو نفسه
+        assert!(files.contains(&"Videos/trip.mp4".to_string()), "{files:?}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn videos_by_year_can_be_turned_off() {
+        let root = temp_tree("videos_off", &["20190704_101010.mp4"]);
+        let (_, result) = organize(&root, &Options { videos_by_year: false, ..Options::default() });
+        assert!(result.failed.is_empty());
+        assert_eq!(tree(&root), ["Videos/Video - 2019-07-04 10-10.mp4"]);
         fs::remove_dir_all(&root).unwrap();
     }
 

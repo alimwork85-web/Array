@@ -30,6 +30,11 @@ fn date_from_name(name: &str) -> Option<String> {
     Some(date)
 }
 
+/// السنة المكتوبة في الاسم نفسه ("20260219_183536_IMG_2755" → 2026)
+pub fn year_from_name(name: &str) -> Option<i32> {
+    RE_NAME_DATE.captures(&to_western_digits(name))?[1].parse().ok()
+}
+
 /// أسماء عامة لا تميّز الملف. ما بعد "=" هو النص الذي يصلح سياقاً للاسم الجديد (فارغ = لا يصلح)
 const PLACEHOLDERS: [(&str, &str); 18] = [
     ("untitled", ""),
@@ -121,12 +126,15 @@ fn format_duration(d: Duration) -> String {
 }
 
 /// اسم جديد: "السياق - التاريخ والوقت - المدة"، مثل "house lo - 2026-09-12 23-31 - 0m07s".
-/// التاريخ من الاسم القديم إن كان فيه (وقت التصوير)، وإلا وقت آخر تعديل للملف.
+/// التاريخ من الاسم القديم إن كان فيه (وقت التصوير)، ثم من بيانات الفيديو، وإلا وقت آخر تعديل للملف.
 pub fn generated_name(context: &str, path: &Path) -> String {
     let mut parts = vec![context.trim().to_string()];
     let old_name = path.file_stem().unwrap_or_default().to_string_lossy();
     if let Some(date) = date_from_name(&old_name) {
         parts.push(date);
+    } else if let Some(created) = crate::video::creation_time(path) {
+        // تاريخ التصوير المحفوظ داخل الفيديو أدق من تاريخ النسخ
+        parts.push(created.format("%Y-%m-%d %H-%M").to_string());
     } else if let Ok(modified) = std::fs::metadata(path).and_then(|m| m.modified()) {
         let local: DateTime<Local> = modified.into();
         parts.push(local.format("%Y-%m-%d %H-%M").to_string());
