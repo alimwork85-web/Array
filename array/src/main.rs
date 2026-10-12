@@ -88,6 +88,8 @@ struct Preview {
     headline: String,
     summary: String,
     rows: Vec<(String, String)>,
+    /// مجلدات برامج ومشاريع تُركت كما هي، مع السبب
+    skipped: Vec<String>,
 }
 
 impl Preview {
@@ -139,7 +141,13 @@ impl Preview {
             .map(|m| (rtl::for_display(&relative(&m.from, &plan.source)), rtl::for_display(&relative(&m.to, &plan.output_base))))
             .collect();
 
-        Self { plan, headline, summary, rows }
+        let skipped = plan
+            .skipped
+            .iter()
+            .map(|(dir, reason)| rtl::for_display(&format!("{}  —  {}", relative(dir, &plan.source), reason)))
+            .collect();
+
+        Self { plan, headline, summary, rows, skipped }
     }
 }
 
@@ -203,6 +211,12 @@ impl ArrayApp {
                 None => return,
                 Some(Ok(plan)) if plan.moves.is_empty() => {
                     self.status_message = "No files to organize in this folder.".to_string();
+                    if !plan.skipped.is_empty() {
+                        self.status_message.push_str(&format!(
+                            " {} program or project folders were left untouched.",
+                            plan.skipped.len()
+                        ));
+                    }
                 }
                 Some(Ok(plan)) => {
                     self.status_message = "Review where each file will go, then confirm.".to_string();
@@ -426,6 +440,20 @@ impl ArrayApp {
         ui.separator();
         ui.label(egui::RichText::new(&preview.headline).strong());
         ui.label(rtl::for_display(&preview.summary));
+        if !preview.skipped.is_empty() {
+            egui::CollapsingHeader::new(format!(
+                "🛡 {} program or project folders will not be touched (click to see)",
+                preview.skipped.len()
+            ))
+            .id_source("skipped_folders")
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().id_source("skipped_list").max_height(90.0).show(ui, |ui| {
+                    for line in &preview.skipped {
+                        ui.label(line);
+                    }
+                });
+            });
+        }
         ui.add_space(4.0);
 
         let row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;

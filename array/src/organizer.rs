@@ -52,6 +52,8 @@ pub struct Plan {
     pub source: PathBuf,
     pub output_base: PathBuf,
     pub moves: Vec<PlannedMove>,
+    /// مجلدات برامج أو مشاريع لم يُلمس أي شيء داخلها، مع السبب
+    pub skipped: Vec<(PathBuf, String)>,
 }
 
 /// نتيجة التنفيذ أو التراجع
@@ -88,11 +90,14 @@ pub struct OrganizerEngine;
 impl OrganizerEngine {
     pub fn get_file_type(ext: &str) -> FileType {
         match ext.to_lowercase().as_str() {
-            "mp3" | "flac" | "m4a" | "wav" | "aac" | "ogg" | "wma" | "opus" => FileType::Audio,
-            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" => FileType::Image,
-            "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" => FileType::Video,
-            "pdf" | "docx" | "doc" | "xlsx" | "pptx" | "txt" | "epub" => FileType::Document,
-            "zip" | "rar" | "7z" | "tar" | "gz" => FileType::Archive,
+            "mp3" | "flac" | "m4a" | "m4b" | "wav" | "aac" | "ogg" | "wma" | "opus" | "aiff" | "aif" | "amr" => FileType::Audio,
+            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "heic" | "heif" | "tif" | "tiff" | "cr2" | "nef" | "arw" | "dng" => FileType::Image,
+            "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" | "m4v" | "3gp" | "mpg" | "mpeg" => FileType::Video,
+            "pdf" | "docx" | "doc" | "xlsx" | "xls" | "pptx" | "ppt" | "odt" | "ods" | "odp" | "rtf" | "txt" | "epub" | "mobi" | "azw3" => {
+                FileType::Document
+            }
+            "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" => FileType::Archive,
+            // أي نوع آخر (برامج، اختصارات، إعدادات، قواعد بيانات، ملفات غير معروفة) لا يُلمس أبداً
             _ => FileType::Other,
         }
     }
@@ -198,22 +203,39 @@ impl OrganizerEngine {
     }
 
     fn check_source(source_path: &Path) -> Result<PathBuf, String> {
-        if !source_path.is_dir() || !SafetyChecker::is_safe_root(source_path) {
-            return Err("The selected folder does not exist or is a protected system location.".to_string());
+        if !source_path.is_dir() {
+            return Err("The selected folder does not exist.".to_string());
         }
+        SafetyChecker::check_root(source_path)?;
         Ok(source_path.join("Array_Organized"))
     }
 
-    /// كل الملفات المعروفة الأنواع التي سيتم نقلها
-    fn collect_files(source_path: &Path, output_base: &Path) -> Vec<PathBuf> {
-        // تخطّي مجلد المخرجات والمجلدات المخفية/مجلدات البرامج بكل ما فيها
+    /// كل الملفات المعروفة الأنواع التي سيتم نقلها، ومجلدات البرامج والمشاريع التي تُركت مع السبب
+    fn collect_files(source_path: &Path, output_base: &Path) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) {
+        let mut skipped: Vec<(PathBuf, String)> = Vec::new();
+
+        // تخطّي مجلد المخرجات، والمخفي وملفات النظام والروابط، ومجلدات البرامج والمشاريع بكل ما فيها
         let walker = WalkDir::new(source_path).into_iter().filter_entry(|e| {
-            e.depth() == 0
-                || !e.file_type().is_dir()
-                || (e.path() != output_base && !SafetyChecker::is_skipped_dir_name(&e.file_name().to_string_lossy()))
+            if e.depth() == 0 {
+                return true;
+            }
+            if e.metadata().map_or(true, |m| SafetyChecker::is_hidden_or_system(&m)) {
+                return false;
+            }
+            if !e.file_type().is_dir() {
+                return true;
+            }
+            if e.path() == output_base || SafetyChecker::is_skipped_dir_name(&e.file_name().to_string_lossy()) {
+                return false;
+            }
+            if let Some(kind) = SafetyChecker::program_folder(e.path()) {
+                skipped.push((e.path().to_path_buf(), kind.reason()));
+                return false;
+            }
+            true
         });
 
-        walker
+        let files = walker
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
             .filter(|e| {
@@ -223,7 +245,8 @@ impl OrganizerEngine {
                     .is_some_and(|ext| !matches!(Self::get_file_type(ext), FileType::Other))
             })
             .map(|e| e.into_path())
-            .collect()
+            .collect();
+        (files, skipped)
     }
 
     /// حساب وجهة كل ملف بدون نقل أي شيء
@@ -232,8 +255,9 @@ impl OrganizerEngine {
         let keywords: Vec<String> = options.speaker_keywords.iter().map(|k| Self::group_key(k.trim())).collect();
 
         let mut raw_files: Vec<RawFileInfo> = Vec::new();
+        let (files, skipped) = Self::collect_files(source_path, &output_base);
 
-        for path in Self::collect_files(source_path, &output_base) {
+        for path in files {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_string();
             let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
 
@@ -270,7 +294,7 @@ impl OrganizerEngine {
         }
 
         let moves = Self::plan_moves(raw_files, &output_base, &keywords);
-        Ok(Plan { source: source_path.to_path_buf(), output_base, moves })
+        Ok(Plan { source: source_path.to_path_buf(), output_base, moves, skipped })
     }
 
     /// تنفيذ الخطة: نقل الملفات ثم حذف المجلدات التي أُفرغت. progress يزيد مع كل ملف.
@@ -512,10 +536,11 @@ pub(crate) mod tests {
             "song_one.mp3",
             "IMG_001.jpg",
             "docs/report (final).pdf",
-            ".git/notes.txt",
+            "repo/.git/notes.txt",
+            "repo/readme.txt",
             "AppData/config.txt",
         ]);
-        fs::create_dir_all(root.join(".git/empty")).unwrap();
+        fs::create_dir_all(root.join("repo/.git/empty")).unwrap();
         fs::create_dir_all(root.join("keep_me/inner")).unwrap();
 
         let (_, result) = organize(&root, &Options::default());
@@ -530,14 +555,67 @@ pub(crate) mod tests {
         assert!(out.join("Pictures/IMG 001.jpg").exists());
         assert!(out.join("Documents/report.pdf").exists());
         // المجلدات المخفية ومجلدات البرامج لا تُلمس
-        assert!(root.join(".git/notes.txt").exists());
-        assert!(root.join(".git/empty").is_dir());
+        assert!(root.join("repo/.git/notes.txt").exists());
+        assert!(root.join("repo/readme.txt").exists());
+        assert!(root.join("repo/.git/empty").is_dir());
         assert!(root.join("AppData/config.txt").exists());
         // المجلدات التي أُفرغت تُحذف
         assert!(!root.join("a").exists() && !root.join("docs").exists());
         // المجلدات التي كانت فارغة قبل التشغيل تبقى
         assert!(root.join("keep_me/inner").is_dir());
 
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn never_touches_programs_projects_scripts_or_web_pages() {
+        let root = temp_tree("programs", &[
+            "Photos/a.jpg",
+            "MyTool/tool.exe",
+            "MyTool/settings.txt",
+            "MyTool/icon.png",
+            "MyProject/Cargo.toml",
+            "MyProject/assets/logo.png",
+            "MyProject/notes.txt",
+            "Scripts/backup.ps1",
+            "Scripts/list.txt",
+            "SavedPage/page.html",
+            "SavedPage/page_files/img.jpg",
+            "Game/config.ini",
+            "Game/screenshot.png",
+            "Lib/core.dll",
+            "Lib/manual.pdf",
+        ]);
+
+        let plan = OrganizerEngine::plan(&root, &Options::default()).unwrap();
+
+        let moved: Vec<_> = plan.moves.iter().map(|m| m.from.strip_prefix(&root).unwrap().to_path_buf()).collect();
+        assert_eq!(moved, vec![PathBuf::from("Photos").join("a.jpg")]);
+        let mut skipped: Vec<_> = plan.skipped.iter().map(|(p, _)| p.file_name().unwrap().to_string_lossy().to_string()).collect();
+        skipped.sort();
+        assert_eq!(skipped, ["Game", "Lib", "MyProject", "MyTool", "SavedPage", "Scripts"]);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn refuses_to_organize_a_program_folder_itself() {
+        let root = temp_tree("tool_root", &["tool.exe", "data.txt"]);
+        let err = OrganizerEngine::plan(&root, &Options::default()).err().unwrap();
+        assert!(err.contains("program"), "{err}");
+        assert!(root.join("data.txt").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn handles_all_media_and_document_types() {
+        let root = temp_tree("types", &["a.heic", "b.mov", "c.flac", "d.xls", "e.7z", "f.lnk", "g.db", "h.unknown"]);
+        let plan = OrganizerEngine::plan(&root, &Options::default()).unwrap();
+
+        let mut targets: Vec<_> = plan.moves.iter().map(|m| m.to.strip_prefix(&plan.output_base).unwrap().components().next().unwrap().as_os_str().to_string_lossy().to_string()).collect();
+        targets.sort();
+        assert_eq!(targets, ["Archives", "Documents", "Music", "Pictures", "Videos"]);
+        // اختصارات وقواعد بيانات وملفات غير معروفة لا تُلمس
+        assert_eq!(plan.moves.len(), 5);
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -582,7 +660,12 @@ pub(crate) mod tests {
         let root = temp_tree("interrupted", &["a/1.pdf", "a/2.pdf", "a/3.pdf"]);
         let plan = OrganizerEngine::plan(&root, &Options::default()).unwrap();
         // البرنامج توقف بعد نقل أول ملف فقط، والسجل يحتوي الخطة كاملة
-        let partial = Plan { source: plan.source.clone(), output_base: plan.output_base.clone(), moves: plan.moves[..1].to_vec() };
+        let partial = Plan {
+            source: plan.source.clone(),
+            output_base: plan.output_base.clone(),
+            moves: plan.moves[..1].to_vec(),
+            skipped: Vec::new(),
+        };
         OrganizerEngine::execute(&partial, &AtomicUsize::new(0));
 
         let undone = OrganizerEngine::undo(&plan.moves, &plan.source, &AtomicUsize::new(0));
