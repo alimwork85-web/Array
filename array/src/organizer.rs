@@ -45,6 +45,8 @@ pub struct Options {
     pub keep_existing_folders: bool,
     /// ترتيب الصور المتفرقة في مجلدات الأشخاص الموجودة بالتعرّف على الوجوه (مع keep_existing_folders فقط)
     pub sort_by_faces: bool,
+    /// مظهر الواجهة: "system" يتبع ويندوز، أو "light" أو "dark"
+    pub appearance: String,
 }
 
 impl Default for Options {
@@ -55,6 +57,7 @@ impl Default for Options {
             ai_markers: DEFAULT_AI_MARKERS.iter().map(|k| k.to_string()).collect(),
             keep_existing_folders: true,
             sort_by_faces: true,
+            appearance: "system".to_string(),
         }
     }
 }

@@ -1,30 +1,9 @@
-use eframe::egui;
 use std::sync::LazyLock;
 
 use regex::Regex;
 use unicode_bidi::{BidiInfo, Level};
 
 static RE_NUMBER_RUN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[0-9]+(?:[-:./][0-9]+)+").unwrap());
-
-/// خطوط ويندوز التي تحتوي الحروف العربية (أول خط موجود يُستخدم)
-const ARABIC_FONTS: [&str; 3] = [
-    "C:\\Windows\\Fonts\\tahoma.ttf",
-    "C:\\Windows\\Fonts\\arial.ttf",
-    "C:\\Windows\\Fonts\\segoeui.ttf",
-];
-
-/// إضافة خط عربي احتياطي بعد خطوط egui الافتراضية حتى لا تظهر الحروف العربية مربعات
-pub fn install_arabic_font(ctx: &egui::Context) {
-    let Some(bytes) = ARABIC_FONTS.iter().find_map(|p| std::fs::read(p).ok()) else {
-        return;
-    };
-    let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert("arabic".to_owned(), egui::FontData::from_owned(bytes));
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        fonts.families.entry(family).or_default().push("arabic".to_owned());
-    }
-    ctx.set_fonts(fonts);
-}
 
 fn has_arabic(text: &str) -> bool {
     text.chars().any(|c| matches!(c, '\u{0600}'..='\u{06FF}' | '\u{0750}'..='\u{077F}'))
