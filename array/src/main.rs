@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod faces;
 mod grouping;
 mod naming;
 mod normalizer;
@@ -9,7 +10,7 @@ mod safety;
 mod storage;
 
 use eframe::egui;
-use organizer::{Options, OrganizerEngine, Plan};
+use organizer::{Options, OrganizerEngine, Plan, PlanProgress};
 use rfd::FileDialog;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -55,7 +56,7 @@ fn load_app_icon() -> egui::IconData {
 
 /// عمل جارٍ في الخلفية حتى لا تتجمد النافذة مع المجلدات الكبيرة
 enum Job {
-    Planning(Receiver<Result<Plan, String>>),
+    Planning(Receiver<Result<Plan, String>>, Arc<PlanProgress>),
     /// تنظيم أو تراجع، مع عدّاد الملفات المنجزة لشريط التقدم
     Moving {
         label: &'static str,
@@ -157,8 +158,25 @@ impl Preview {
         let rows = plan
             .moves
             .iter()
-            .map(|m| (rtl::for_display(&relative(&m.from, &plan.source)), rtl::for_display(&relative(&m.to, &plan.source))))
+            .map(|m| {
+                let mut to = relative(&m.to, &plan.source);
+                if let Some((_, score)) = plan.face_matches.get(&m.from) {
+                    to.push_str(&format!("   (face {:.0}%)", score * 100.0));
+                }
+                (rtl::for_display(&relative(&m.from, &plan.source)), rtl::for_display(&to))
+            })
             .collect();
+        let mut summary = summary;
+        if !plan.people.is_empty() {
+            summary.push_str(&format!(
+                "\nPeople recognized from your folders: {}  —  {} matched by face",
+                plan.people.join(", "),
+                if plan.face_matches.len() == 1 { "1 loose photo".to_string() } else { format!("{} loose photos", plan.face_matches.len()) }
+            ));
+        }
+        if let Some(note) = &plan.face_note {
+            summary.push_str(&format!("\n{}", note));
+        }
 
         let skipped = plan
             .skipped
@@ -226,7 +244,7 @@ impl ArrayApp {
     fn poll_job(&mut self) {
         let Some(job) = &self.job else { return };
         match job {
-            Job::Planning(rx) => match poll(rx) {
+            Job::Planning(rx, _) => match poll(rx) {
                 None => return,
                 Some(Ok(plan)) if plan.moves.is_empty() => {
                     self.status_message = if plan.kept_in_folders > 0 {
@@ -273,7 +291,13 @@ impl ArrayApp {
     fn start_planning(&mut self, ctx: &egui::Context, path: PathBuf) {
         self.reload_settings();
         let options = self.options.clone();
-        self.job = Some(Job::Planning(spawn_job(ctx, move || OrganizerEngine::plan(&path, &options))));
+        let progress = Arc::new(PlanProgress::default());
+        let shared = progress.clone();
+        let cache = self.storage.face_cache_path();
+        self.job = Some(Job::Planning(
+            spawn_job(ctx, move || OrganizerEngine::plan_with(&path, &options, &shared, Some(&cache))),
+            progress,
+        ));
         self.status_message = "⏳ Scanning files...".to_string();
     }
 
@@ -429,6 +453,17 @@ impl ArrayApp {
             {
                 self.set_option(|o| o.keep_existing_folders = keep);
             }
+            let mut by_faces = self.options.sort_by_faces;
+            if ui
+                .add_enabled(!busy && keep, egui::Checkbox::new(&mut by_faces, "Sort loose photos into people folders by face"))
+                .on_hover_text(
+                    "Learns faces from your existing folders (e.g. Ali, Mom) and suggests moving a loose photo there \
+                     only when exactly one known person is clearly recognized. Runs on this computer only.",
+                )
+                .changed()
+            {
+                self.set_option(|o| o.sort_by_faces = by_faces);
+            }
         });
 
         ui.add_space(10.0);
@@ -455,7 +490,14 @@ impl ArrayApp {
 
     fn show_progress(&self, ui: &mut egui::Ui) {
         match &self.job {
-            Some(Job::Planning(_)) => {
+            Some(Job::Planning(_, progress)) if progress.total.load(Ordering::Relaxed) > 0 => {
+                let (done, total) = (progress.done.load(Ordering::Relaxed), progress.total.load(Ordering::Relaxed));
+                let stage = progress.stage.lock().unwrap().clone();
+                ui.add_space(16.0);
+                ui.add(egui::ProgressBar::new(done as f32 / total as f32).text(format!("{}: {} / {} photos", stage, done, total)));
+                ui.label("The first time takes a few minutes; results are remembered for next time.");
+            }
+            Some(Job::Planning(..)) => {
                 ui.add_space(16.0);
                 ui.vertical_centered(|ui| {
                     ui.horizontal(|ui| {

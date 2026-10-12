@@ -1,5 +1,10 @@
 use eframe::egui;
+use std::sync::LazyLock;
+
+use regex::Regex;
 use unicode_bidi::{BidiInfo, Level};
+
+static RE_NUMBER_RUN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[0-9]+(?:[-:./][0-9]+)+").unwrap());
 
 /// خطوط ويندوز التي تحتوي الحروف العربية (أول خط موجود يُستخدم)
 const ARABIC_FONTS: [&str; 3] = [
@@ -40,13 +45,17 @@ fn shape_segment(segment: &str) -> String {
     if !has_arabic(segment) {
         return segment.to_string();
     }
-    let shaped = ar_reshaper::reshape_line(segment);
+    // أرقام مفصولة بـ - أو : أو . أو / (تواريخ وأوقات) تُعزل لتبقى بترتيبها من اليسار لليمين،
+    // وإلا عرض النص العربي "2026-03-18" بالمقلوب "18-03-2026"
+    let isolated = RE_NUMBER_RUN.replace_all(segment, "\u{2066}$0\u{2069}");
+    let shaped = ar_reshaper::reshape_line(&isolated);
     let bidi = BidiInfo::new(&shaped, None::<Level>);
     let mut out = String::with_capacity(shaped.len());
     for para in &bidi.paragraphs {
         let (levels, runs) = bidi.visual_runs(para, para.range.clone());
         for run in runs {
-            let text = &shaped[run.clone()];
+            let text: String = shaped[run.clone()].chars().filter(|c| !matches!(c, '\u{2066}'..='\u{2069}')).collect();
+            let text = text.as_str();
             if levels[run.start].is_rtl() {
                 // عكس المقطع ومرآة الأقواس، لأن egui يرسم الحروف كما هي بلا مرآة
                 out.extend(text.chars().rev().map(mirror));
@@ -94,6 +103,13 @@ mod tests {
     fn path_keeps_ltr_order_around_arabic() {
         let shown = for_display("D:\\موسيقى\\a");
         assert!(shown.starts_with("D:\\") && shown.ends_with("\\a"), "{shown:?}");
+    }
+
+    #[test]
+    fn dates_inside_arabic_names_keep_their_order() {
+        let shown = for_display("صورة أرشيفية - 2026-03-18");
+        assert!(shown.contains("2026-03-18"), "{shown:?}");
+        assert!(!shown.contains('\u{2066}') && !shown.contains('\u{2069}'), "{shown:?}");
     }
 
     #[test]

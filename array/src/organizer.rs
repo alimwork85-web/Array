@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 use lofty::file::TaggedFileExt;
 use lofty::probe::Probe;
 use lofty::tag::Accessor;
@@ -10,6 +10,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
+use crate::faces::{self, FaceCache};
 use crate::grouping::{self, Assignment, Track, DEFAULT_AI_MARKERS};
 use crate::naming;
 use crate::normalizer::{fix_mojibake, looks_garbled, normalize_arabic, sanitize_filename, to_western_digits};
@@ -42,6 +43,8 @@ pub struct Options {
     /// الملفات الموجودة داخل مجلدات فرعية تبقى كما هي (لا تُنقل ولا يُعاد تسميتها)؛
     /// فقط الملفات المتفرقة في المجلد المختار تُنظَّم. عند false تُفرَّغ كل المجلدات ويُعاد بناؤها.
     pub keep_existing_folders: bool,
+    /// ترتيب الصور المتفرقة في مجلدات الأشخاص الموجودة بالتعرّف على الوجوه (مع keep_existing_folders فقط)
+    pub sort_by_faces: bool,
 }
 
 impl Default for Options {
@@ -51,6 +54,7 @@ impl Default for Options {
             speaker_keywords: DEFAULT_SPEAKER_KEYWORDS.iter().map(|k| k.to_string()).collect(),
             ai_markers: DEFAULT_AI_MARKERS.iter().map(|k| k.to_string()).collect(),
             keep_existing_folders: true,
+            sort_by_faces: true,
         }
     }
 }
@@ -72,6 +76,12 @@ pub struct Plan {
     pub in_place: usize,
     /// ملفات داخل مجلدات المستخدم الموجودة تُركت كما هي (خيار keep_existing_folders)
     pub kept_in_folders: usize,
+    /// صور متفرقة نُسبت إلى مجلد شخص بالتعرّف على الوجه: المسار الأصلي → (الشخص، درجة التشابه)
+    pub face_matches: HashMap<PathBuf, (String, f32)>,
+    /// أسماء مجلدات الأشخاص التي تعلّم البرنامج وجوههم
+    pub people: Vec<String>,
+    /// ملاحظة عن التعرّف على الوجوه (مثل صور HEIC لم تُقرأ)
+    pub face_note: Option<String>,
     /// مجلدات برامج أو مشاريع لم يُلمس أي شيء داخلها، مع السبب
     pub skipped: Vec<(PathBuf, String)>,
 }
@@ -83,6 +93,41 @@ pub struct RunResult {
     pub failed: Vec<PlannedMove>,
     /// في التراجع: ملفات كانت في مكانها الأصلي أصلاً (تنظيم توقف قبل نقلها)
     pub unchanged: usize,
+}
+
+/// تقدّم مرحلة التخطيط (التعرّف على الوجوه قد يستغرق دقائق)
+#[derive(Default)]
+pub struct PlanProgress {
+    pub stage: Mutex<String>,
+    pub done: AtomicUsize,
+    pub total: AtomicUsize,
+}
+
+impl PlanProgress {
+    fn start(&self, stage: &str, total: usize) {
+        *self.stage.lock().unwrap() = stage.to_string();
+        self.done.store(0, Ordering::Relaxed);
+        self.total.store(total, Ordering::Relaxed);
+    }
+}
+
+/// صور يمكن قراءتها للتعرّف على الوجوه (HEIC غير مدعومة حالياً)
+fn face_readable(path: &Path) -> bool {
+    path.extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .is_some_and(|e| matches!(e.as_str(), "jpg" | "jpeg" | "png" | "bmp" | "gif" | "webp" | "tif" | "tiff"))
+}
+
+/// صور مأخوذة بالتساوي من القائمة
+fn spread(paths: &[PathBuf], n: usize) -> Vec<PathBuf> {
+    let step = (paths.len() / n.max(1)).max(1);
+    paths.iter().step_by(step).take(n).cloned().collect()
+}
+
+struct FaceSorting {
+    matches: HashMap<PathBuf, (PathBuf, String, f32)>,
+    people: Vec<String>,
+    note: Option<String>,
 }
 
 pub enum FileType {
@@ -325,7 +370,13 @@ impl OrganizerEngine {
 
     /// حساب وجهة كل ملف بدون نقل أي شيء. كل الملفات في المجلدات الفرعية تُجمع ثم تُوزَّع
     /// على مجلدات الفئات داخل المجلد المختار نفسه (الموجودة أو الجديدة).
+    #[cfg(test)]
     pub fn plan(source_path: &Path, options: &Options) -> Result<Plan, String> {
+        Self::plan_with(source_path, options, &PlanProgress::default(), None)
+    }
+
+    /// مثل plan مع تقدّم للواجهة وملف ذاكرة بصمات الوجوه (حتى لا يُعاد تحليل الصور كل مرة)
+    pub fn plan_with(source_path: &Path, options: &Options, progress: &PlanProgress, face_cache: Option<&Path>) -> Result<Plan, String> {
         Self::check_source(source_path)?;
         let keywords: Vec<String> = options.speaker_keywords.iter().map(|k| Self::group_key(k.trim())).collect();
 
@@ -427,15 +478,22 @@ impl OrganizerEngine {
             raw_files.into_iter().partition(|f| !(options.keep_existing_folders && kept(&f.path)));
         let kept_in_folders = kept_files.len();
 
+        let face_sorting = if options.keep_existing_folders && options.sort_by_faces {
+            Self::sort_by_faces(&raw_files, &category_dirs["Pictures"], progress, face_cache)
+        } else {
+            FaceSorting { matches: HashMap::new(), people: Vec::new(), note: None }
+        };
+
         let targeted: Vec<(RawFileInfo, PathBuf)> = raw_files
             .into_iter()
             .map(|mut f| {
-                let dir = target_dir(&f);
+                let face = face_sorting.matches.get(&f.path);
+                let dir = face.map_or_else(|| target_dir(&f), |(dir, _, _)| dir.clone());
                 if f.needs_name {
                     let group_context = match f.track_index.map(|i| &assignments[i]) {
                         Some(Assignment::Folder(name)) => Some(name.clone()),
                         Some(Assignment::Ai) => Some("AI Music".to_string()),
-                        _ => None,
+                        _ => face.map(|(_, person, _)| person.clone()),
                     };
                     let category_word = match f.category.as_str() {
                         "Music" => "Audio",
@@ -470,7 +528,96 @@ impl OrganizerEngine {
         }
         new_dirs.sort();
 
-        Ok(Plan { source: source_path.to_path_buf(), moves, new_dirs, in_place, kept_in_folders, skipped })
+        // الملاحظات تخص فقط الصور التي ستُنقل فعلاً (لا التي هي في مكانها)
+        let moved_from: HashSet<&PathBuf> = moves.iter().map(|m| &m.from).collect();
+        let face_matches = face_sorting
+            .matches
+            .into_iter()
+            .filter(|(from, _)| moved_from.contains(from))
+            .map(|(from, (_, person, score))| (from, (person, score)))
+            .collect();
+
+        Ok(Plan {
+            source: source_path.to_path_buf(),
+            moves,
+            new_dirs,
+            in_place,
+            kept_in_folders,
+            face_matches,
+            people: face_sorting.people,
+            face_note: face_sorting.note,
+            skipped,
+        })
+    }
+
+    /// يتعلّم وجوه أصحاب المجلدات الموجودة (Ali، Mom...) ثم يقترح لكل صورة متفرقة مجلد صاحبها.
+    /// لا يُقترح شيء إلا لصورة فيها شخص معروف واحد بتشابه واضح؛ غير ذلك تبقى الصورة مكانها.
+    fn sort_by_faces(files: &[RawFileInfo], pictures_dir: &Path, progress: &PlanProgress, cache_path: Option<&Path>) -> FaceSorting {
+        let mut sorting = FaceSorting { matches: HashMap::new(), people: Vec::new(), note: None };
+        let loose: Vec<PathBuf> = files.iter().filter(|f| f.category == "Pictures").map(|f| f.path.clone()).collect();
+        let readable: Vec<PathBuf> = loose.iter().filter(|p| face_readable(p)).cloned().collect();
+        if readable.is_empty() {
+            return sorting;
+        }
+
+        // مجلدات الأشخاص المرشحة: مجلدات فرعية بأسماء ليست سنوات ولا أسماء عامة
+        let mut folders: Vec<(String, PathBuf, Vec<PathBuf>)> = fs::read_dir(pictures_dir)
+            .map(|entries| entries.flatten().collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.metadata().is_ok_and(|m| m.is_dir() && !SafetyChecker::is_hidden_or_system(&m)))
+            .map(|e| (e.file_name().to_string_lossy().to_string(), e.path()))
+            .filter(|(name, dir)| !faces::is_generic_folder_name(name) && !SafetyChecker::is_skipped_dir_name(name) && SafetyChecker::program_folder(dir).is_none())
+            .filter_map(|(name, dir)| {
+                let mut images: Vec<PathBuf> = fs::read_dir(&dir).ok()?.flatten().map(|e| e.path()).filter(|p| face_readable(p)).collect();
+                images.sort();
+                (images.len() >= 10).then(|| (name, dir, spread(&images, 150)))
+            })
+            .collect();
+        folders.sort_by(|a, b| a.0.cmp(&b.0));
+        if folders.is_empty() {
+            return sorting;
+        }
+
+        let cache = Mutex::new(cache_path.map(FaceCache::load).unwrap_or_default());
+        let learn_total: usize = folders.iter().map(|f| f.2.len()).sum();
+        progress.start("Learning faces from your folders", learn_total);
+        let mut people = Vec::new();
+        for (name, dir, sample) in &folders {
+            match faces::analyze_all(sample, &cache, &progress.done) {
+                Ok(analyzed) => {
+                    let photos: Vec<_> = sample.iter().map(|p| analyzed.get(p).cloned().flatten()).collect();
+                    people.extend(faces::learn_person(name, dir, &photos));
+                }
+                Err(err) => {
+                    sorting.note = Some(format!("Face sorting is off: {err}"));
+                    return sorting;
+                }
+            }
+        }
+        faces::remove_conflicts(&mut people);
+        sorting.people = people.iter().map(|p| p.name.clone()).collect();
+
+        if !people.is_empty() {
+            progress.start("Recognizing faces in loose photos", readable.len());
+            if let Ok(analyzed) = faces::analyze_all(&readable, &cache, &progress.done) {
+                for path in &readable {
+                    if let Some(Some(found)) = analyzed.get(path) {
+                        if let Some((who, score)) = faces::photo_owner(found, &people, faces::MATCH) {
+                            sorting.matches.insert(path.clone(), (people[who].dir.clone(), people[who].name.clone(), score));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(path) = cache_path {
+            cache.lock().unwrap().save(path);
+        }
+        let unreadable = loose.len() - readable.len();
+        if unreadable > 0 {
+            sorting.note = Some(format!("{} photos (HEIC/HEIF) could not be read for face sorting.", unreadable));
+        }
+        sorting
     }
 
     /// تنفيذ الخطة: نقل الملفات ثم حذف المجلدات التي أُفرغت. progress يزيد مع كل ملف.
@@ -1031,6 +1178,9 @@ pub(crate) mod tests {
             new_dirs: plan.new_dirs.clone(),
             in_place: 0,
             kept_in_folders: 0,
+            face_matches: HashMap::new(),
+            people: Vec::new(),
+            face_note: None,
             skipped: Vec::new(),
         };
         OrganizerEngine::execute(&partial, &AtomicUsize::new(0));

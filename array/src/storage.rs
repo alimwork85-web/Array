@@ -38,6 +38,11 @@ impl Storage {
         self.dir.join("settings.json")
     }
 
+    /// ذاكرة بصمات الوجوه (حتى لا تُحلَّل نفس الصورة مرتين)
+    pub fn face_cache_path(&self) -> PathBuf {
+        self.dir.join("face_cache.json")
+    }
+
     fn undo_path(&self) -> PathBuf {
         self.dir.join("last_organize.json")
     }
