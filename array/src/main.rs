@@ -77,11 +77,37 @@ fn create_app_icon() -> egui::IconData {
     }
 }
 
+/// عمل جارٍ في الخلفية حتى لا تتجمد النافذة مع المجلدات الكبيرة
+enum Job {
+    Counting(Receiver<Result<usize, String>>),
+    Organizing(Receiver<Result<String, String>>),
+}
+
+fn spawn_job<T: Send + 'static>(ctx: &egui::Context, work: impl FnOnce() -> T + Send + 'static) -> Receiver<T> {
+    let (tx, rx) = mpsc::channel();
+    let ctx = ctx.clone();
+    thread::spawn(move || {
+        let _ = tx.send(work());
+        ctx.request_repaint();
+    });
+    rx
+}
+
+/// قراءة نتيجة العمل إن انتهى؛ توقف الخيط بشكل غير متوقع يُعامل كخطأ
+fn poll<T>(rx: &Receiver<Result<T, String>>) -> Option<Result<T, String>> {
+    match rx.try_recv() {
+        Ok(result) => Some(result),
+        Err(TryRecvError::Disconnected) => Some(Err("organizing stopped unexpectedly".to_string())),
+        Err(TryRecvError::Empty) => None,
+    }
+}
+
 struct ArrayApp {
     selected_path: Option<PathBuf>,
     status_message: String,
-    /// نتيجة التنظيم الجاري في الخلفية (None عندما لا يوجد عمل)
-    pending: Option<Receiver<Result<String, String>>>,
+    job: Option<Job>,
+    /// عدد الملفات بانتظار تأكيد المستخدم قبل النقل
+    confirm_count: Option<usize>,
 }
 
 impl Default for ArrayApp {
@@ -89,26 +115,66 @@ impl Default for ArrayApp {
         Self {
             selected_path: None,
             status_message: "Please select a folder to organize...".to_string(),
-            pending: None,
+            job: None,
+            confirm_count: None,
         }
+    }
+}
+
+impl ArrayApp {
+    fn poll_job(&mut self) {
+        let finished = match &self.job {
+            Some(Job::Counting(rx)) => poll(rx).map(|result| match result {
+                Ok(0) => "No files to organize in this folder.".to_string(),
+                Ok(n) => {
+                    self.confirm_count = Some(n);
+                    "Waiting for confirmation...".to_string()
+                }
+                Err(err) => format!("❌ Error: {}", err),
+            }),
+            Some(Job::Organizing(rx)) => poll(rx).map(|result| match result {
+                Ok(msg) => msg,
+                Err(err) => format!("❌ Error: {}", err),
+            }),
+            None => None,
+        };
+        if let Some(msg) = finished {
+            self.status_message = msg;
+            self.job = None;
+        }
+    }
+
+    fn show_confirmation(&mut self, ctx: &egui::Context) {
+        let (Some(count), Some(path)) = (self.confirm_count, self.selected_path.clone()) else {
+            return;
+        };
+        egui::Window::new("Confirm")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(format!("{} files will be moved and renamed into \"Array_Organized\".", count));
+                ui.label("This cannot be undone. Continue?");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("✔ Yes, organize").clicked() {
+                        self.confirm_count = None;
+                        self.job = Some(Job::Organizing(spawn_job(ctx, move || OrganizerEngine::process_directory(&path))));
+                        self.status_message = "⏳ Organizing... please wait".to_string();
+                    }
+                    if ui.button("✖ Cancel").clicked() {
+                        self.confirm_count = None;
+                        self.status_message = "Cancelled. No files were moved.".to_string();
+                    }
+                });
+            });
     }
 }
 
 impl eframe::App for ArrayApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if let Some(rx) = &self.pending {
-            let finished = match rx.try_recv() {
-                Ok(Ok(msg)) => Some(msg),
-                Ok(Err(err)) => Some(format!("❌ Error: {}", err)),
-                Err(TryRecvError::Disconnected) => Some("❌ Error: organizing stopped unexpectedly".to_string()),
-                Err(TryRecvError::Empty) => None,
-            };
-            if let Some(msg) = finished {
-                self.status_message = msg;
-                self.pending = None;
-            }
-        }
-        let busy = self.pending.is_some();
+        self.poll_job();
+        let busy = self.job.is_some() || self.confirm_count.is_some();
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
@@ -131,16 +197,10 @@ impl eframe::App for ArrayApp {
                     ui.add_space(15.0);
 
                     if ui.add_enabled(!busy, egui::Button::new("⚡ Start Organizing Now")).clicked() {
-                        // العمل في خيط منفصل حتى لا تتجمد النافذة مع المجلدات الكبيرة
-                        let (tx, rx) = mpsc::channel();
+                        // عدّ الملفات أولاً ثم طلب التأكيد قبل أي نقل
                         let path = path.clone();
-                        let ctx = ctx.clone();
-                        thread::spawn(move || {
-                            let _ = tx.send(OrganizerEngine::process_directory(&path));
-                            ctx.request_repaint();
-                        });
-                        self.pending = Some(rx);
-                        self.status_message = "⏳ Organizing... please wait".to_string();
+                        self.job = Some(Job::Counting(spawn_job(ctx, move || OrganizerEngine::count_files(&path))));
+                        self.status_message = "⏳ Counting files...".to_string();
                     }
                 }
 
@@ -150,5 +210,7 @@ impl eframe::App for ArrayApp {
                 ui.label(&self.status_message);
             });
         });
+
+        self.show_confirmation(ctx);
     }
 }
