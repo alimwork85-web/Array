@@ -133,7 +133,8 @@ impl OrganizerEngine {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_dir() && path != skip_dir {
+                let skipped = SafetyChecker::is_skipped_dir_name(&entry.file_name().to_string_lossy());
+                if path.is_dir() && path != skip_dir && !skipped {
                     Self::remove_empty_dirs(&path, skip_dir);
                     let _ = fs::remove_dir(&path);
                 }
@@ -142,7 +143,7 @@ impl OrganizerEngine {
     }
 
     pub fn process_directory(source_path: &Path) -> Result<String, String> {
-        if !source_path.exists() || !SafetyChecker::is_safe_to_process(source_path) {
+        if !source_path.is_dir() || !SafetyChecker::is_safe_root(source_path) {
             return Err("المسار المحدد غير آمن أو غير موجود!".to_string());
         }
 
@@ -153,14 +154,17 @@ impl OrganizerEngine {
 
         let mut raw_files: Vec<RawFileInfo> = Vec::new();
 
-        for entry in WalkDir::new(source_path).into_iter().filter_map(|e| e.ok()) {
+        // تخطّي مجلد المخرجات والمجلدات المخفية/مجلدات البرامج بكل ما فيها
+        let walker = WalkDir::new(source_path).into_iter().filter_entry(|e| {
+            e.depth() == 0
+                || !e.file_type().is_dir()
+                || (e.path() != output_base && !SafetyChecker::is_skipped_dir_name(&e.file_name().to_string_lossy()))
+        });
+
+        for entry in walker.filter_map(|e| e.ok()) {
             let path = entry.path();
 
-            if path.starts_with(&output_base) || !SafetyChecker::is_safe_to_process(path) {
-                continue;
-            }
-
-            if path.is_file() {
+            if entry.file_type().is_file() {
                 if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                     let file_type = Self::get_file_type(ext);
                     let ext_lower = ext.to_lowercase();
@@ -352,6 +356,52 @@ mod tests {
         let (_, c) = OrganizerEngine::extract_group_key("أحمد", "x");
         let (_, d) = OrganizerEngine::extract_group_key("احمد", "x");
         assert_eq!(c, d);
+    }
+
+    /// مجلد مؤقت فيه ملفات وهمية فارغة — لا يلمس أي بيانات حقيقية
+    fn temp_tree(name: &str, files: &[&str]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("array_test_{}_{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for f in files {
+            let p = root.join(f);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, b"").unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn organizes_a_folder_end_to_end() {
+        let root = temp_tree("e2e", &[
+            "a/الحلقة 1 - الشيخ محمد.mp3",
+            "a/الحلقة 2 - الشيخ محمد.mp3",
+            "b/الحلقة 3 - الشيخ محمد.mp3",
+            "song_one.mp3",
+            "IMG_001.jpg",
+            "docs/report (final).pdf",
+            ".git/notes.txt",
+            "AppData/config.txt",
+        ]);
+        fs::create_dir_all(root.join(".git/empty")).unwrap();
+
+        let msg = OrganizerEngine::process_directory(&root).unwrap();
+        let out = root.join("Array_Organized");
+
+        assert!(out.join("Music/الشيخ محمد/الشيخ محمد.mp3").exists(), "{msg}");
+        assert!(out.join("Music/الشيخ محمد/الشيخ محمد (1).mp3").exists());
+        assert!(out.join("Music/الشيخ محمد/الشيخ محمد (2).mp3").exists());
+        assert!(out.join("Music/Single Tracks/song one.mp3").exists());
+        assert!(out.join("Pictures/IMG 001.jpg").exists());
+        assert!(out.join("Documents/report.pdf").exists());
+        // المجلدات المخفية ومجلدات البرامج لا تُلمس
+        assert!(root.join(".git/notes.txt").exists());
+        assert!(root.join(".git/empty").is_dir());
+        assert!(root.join("AppData/config.txt").exists());
+        // المجلدات التي أُفرغت تُحذف
+        assert!(!root.join("a").exists() && !root.join("docs").exists());
+        assert!(msg.contains('6'), "{msg}");
+
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
