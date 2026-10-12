@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use crate::grouping::{self, Assignment, Track, DEFAULT_AI_MARKERS};
+use crate::naming;
 use crate::normalizer::{fix_mojibake, looks_garbled, normalize_arabic, sanitize_filename, to_western_digits};
 use crate::safety::SafetyChecker;
 
@@ -94,6 +95,10 @@ struct RawFileInfo {
     track_index: Option<usize>,
     /// اسم الملف الجديد بدون الامتداد (منظَّف أو الأصلي حسب الإعدادات)
     new_stem: String,
+    /// الاسم لا يعبّر عن الملف (كود أو نص عشوائي): يُولَّد له اسم من السياق والتاريخ والمدة
+    needs_name: bool,
+    /// سياق من الاسم العام نفسه ("تسجيل صوتي") إن وُجد
+    placeholder_context: Option<String>,
     extension: String,
 }
 
@@ -114,7 +119,7 @@ impl OrganizerEngine {
         }
     }
 
-    fn clean_string(input: &str) -> String {
+    pub(crate) fn clean_string(input: &str) -> String {
         let input = to_western_digits(&fix_mojibake(input));
         let mut cleaned = RE_NOISE.replace_all(&input, " ").to_string();
         cleaned = RE_PIPES.replace_all(&cleaned, " ").to_string();
@@ -353,6 +358,8 @@ impl OrganizerEngine {
                 (stem, ext)
             };
 
+            let needs_name = options.rename_files && naming::is_junk_name(&new_stem);
+            let placeholder_context = naming::placeholder_context(&new_stem);
             let track_index = track.map(|t| {
                 tracks.push(t);
                 tracks.len() - 1
@@ -362,6 +369,8 @@ impl OrganizerEngine {
                 category: category.to_string(),
                 track_index,
                 new_stem,
+                needs_name,
+                placeholder_context,
                 extension,
             });
         }
@@ -385,10 +394,43 @@ impl OrganizerEngine {
             Some(Assignment::Misc) => misc_dir.clone(),
             None => category_dirs[f.category.as_str()].clone(),
         };
+        // سياق الملف من مجلده الأصلي ("house lo [AUD" → "house lo") إن لم يكن مجلداً عاماً
+        let category_paths: Vec<&PathBuf> = category_dirs.values().collect();
+        let folder_context = |path: &Path| -> Option<String> {
+            let parent = path.parent()?;
+            if parent == source_path || category_paths.contains(&&parent.to_path_buf()) || parent == misc_dir {
+                return None;
+            }
+            let name = parent.file_name()?.to_string_lossy().to_string();
+            if matches!(name.trim().to_lowercase().as_str(), "single tracks" | "unknown") {
+                return None;
+            }
+            let clean = Self::clean_string(&name);
+            (!naming::is_junk_name(&clean)).then_some(clean)
+        };
         let targeted: Vec<(RawFileInfo, PathBuf)> = raw_files
             .into_iter()
-            .map(|f| {
+            .map(|mut f| {
                 let dir = target_dir(&f);
+                if f.needs_name {
+                    let group_context = match f.track_index.map(|i| &assignments[i]) {
+                        Some(Assignment::Folder(name)) => Some(name.clone()),
+                        Some(Assignment::Ai) => Some("AI Music".to_string()),
+                        _ => None,
+                    };
+                    let category_word = match f.category.as_str() {
+                        "Music" => "Audio",
+                        "Pictures" => "Photo",
+                        "Videos" => "Video",
+                        "Documents" => "Document",
+                        _ => "Archive",
+                    };
+                    let context = group_context
+                        .or_else(|| folder_context(&f.path))
+                        .or_else(|| f.placeholder_context.clone())
+                        .unwrap_or_else(|| category_word.to_string());
+                    f.new_stem = sanitize_filename(&naming::generated_name(&context, &f.path));
+                }
                 (f, dir)
             })
             .collect();
@@ -643,15 +685,15 @@ pub(crate) mod tests {
     #[test]
     fn empties_subfolders_and_organizes_inside_the_selected_folder() {
         // المثال: مجلد "صور" موجود يُعاد استخدامه، والفئات الأخرى تُنشأ، و"رحلة 2023" يُفرَّغ ويُحذف
-        let root = temp_tree("inplace", &["رحلة 2023/a.jpg", "رحلة 2023/b.mp4", "صور/c.png", "x.pdf"]);
+        let root = temp_tree("inplace", &["رحلة 2023/sea.jpg", "رحلة 2023/clip.mp4", "صور/cat.png", "cv.pdf"]);
 
         let (plan, result) = organize(&root, &Options::default());
 
         assert!(result.failed.is_empty());
-        assert_eq!(tree(&root), ["Documents/x.pdf", "Videos/b.mp4", "صور/a.jpg", "صور/c.png"]);
+        assert_eq!(tree(&root), ["Documents/cv.pdf", "Videos/clip.mp4", "صور/cat.png", "صور/sea.jpg"]);
         assert!(!root.join("رحلة 2023").exists());
         assert_eq!(plan.new_dirs, [root.join("Documents"), root.join("Videos")]);
-        // c.png في مكانه الصحيح أصلاً فلا يتحرك
+        // cat.png في مكانه الصحيح أصلاً فلا يتحرك
         assert_eq!(plan.in_place, 1);
         fs::remove_dir_all(&root).unwrap();
     }
@@ -662,16 +704,16 @@ pub(crate) mod tests {
             "Photos/old.jpg",
             "الموسيقى/old.mp3",
             "مستندات/old.pdf",
-            "new/a.jpg",
-            "new/b.mp3",
-            "new/c.docx",
+            "new/sea.jpg",
+            "new/song.mp3",
+            "new/cv.docx",
         ]);
 
         organize(&root, &Options::default());
 
-        assert!(root.join("Photos/a.jpg").exists());
-        assert!(root.join("الموسيقى/منوعات/b.mp3").exists());
-        assert!(root.join("مستندات/c.docx").exists());
+        assert!(root.join("Photos/sea.jpg").exists());
+        assert!(root.join("الموسيقى/منوعات/song.mp3").exists());
+        assert!(root.join("مستندات/cv.docx").exists());
         assert!(!root.join("Pictures").exists() && !root.join("Music").exists() && !root.join("Documents").exists());
         fs::remove_dir_all(&root).unwrap();
     }
@@ -765,7 +807,7 @@ pub(crate) mod tests {
     #[test]
     fn never_touches_programs_projects_scripts_or_web_pages() {
         let root = temp_tree("programs", &[
-            "Photos/a.jpg",
+            "Photos/sea.jpg",
             "MyTool/tool.exe",
             "MyTool/settings.txt",
             "MyTool/icon.png",
@@ -785,7 +827,7 @@ pub(crate) mod tests {
 
         let plan = OrganizerEngine::plan(&root, &Options::default()).unwrap();
 
-        // Photos مجلد صور موجود: a.jpg في مكانه، و loose.jpg وحده ينتقل إليه
+        // Photos مجلد صور موجود: sea.jpg في مكانه، و loose.jpg وحده ينتقل إليه
         let moved: Vec<_> = plan.moves.iter().map(|m| m.from.strip_prefix(&root).unwrap().to_path_buf()).collect();
         assert_eq!(moved, vec![PathBuf::from("loose.jpg")]);
         assert_eq!(plan.moves[0].to, root.join("Photos").join("loose.jpg"));
@@ -818,6 +860,39 @@ pub(crate) mod tests {
         assert_eq!(targets, ["Archives", "Documents", "Music", "Pictures", "Videos"]);
         // اختصارات وقواعد بيانات وملفات غير معروفة لا تُلمس
         assert_eq!(plan.moves.len(), 5);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn meaningless_names_get_a_name_from_their_context() {
+        // مثل D:\Music عند المستخدم: المجلد المختار هو مجلد الموسيقى نفسه
+        let root = temp_tree("junk", &[
+            "Music/house lo [AUD/4749d951].mp3",
+            "Music/house lo [AUD/0750707c] (1).mp3",
+            "Music/Single Tracks/14c58cdd].mp3",
+            "Music/Single Tracks/YouTube (1).mp4",
+            "Music/Single Tracks/Ma Yehtaj.mp3",
+        ]);
+        let music = root.join("Music");
+
+        organize(&music, &Options::default());
+
+        let files = tree(&music);
+        // مجلد "house lo [AUD" يُنظَّف اسمه، وملفاته تأخذ اسماً من سياقها
+        assert_eq!(files.iter().filter(|f| f.starts_with("house lo/house lo - 20")).count(), 2, "{files:?}");
+        assert!(files.iter().any(|f| f.starts_with("منوعات/Audio - 20")), "{files:?}");
+        assert!(files.iter().any(|f| f.starts_with("Videos/Video - 20")), "{files:?}");
+        // الاسم المفهوم لا يتغير
+        assert!(files.contains(&"منوعات/Ma Yehtaj.mp3".to_string()), "{files:?}");
+        assert!(!files.iter().any(|f| f.contains("]")), "{files:?}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn meaningless_names_stay_when_renaming_is_off() {
+        let root = temp_tree("junk_off", &["x/4749d951].mp3"]);
+        organize(&root, &Options { rename_files: false, ..Options::default() });
+        assert_eq!(tree(&root), ["Music/منوعات/4749d951].mp3"]);
         fs::remove_dir_all(&root).unwrap();
     }
 

@@ -16,7 +16,7 @@ use lofty::probe::Probe;
 use lofty::tag::{ItemKey, ItemValue};
 use regex::Regex;
 
-use crate::normalizer::{fix_mojibake, normalize_arabic, sanitize_filename, strip_diacritics, to_western_digits};
+use crate::normalizer::{fix_mojibake, normalize_arabic, strip_diacritics, to_western_digits};
 
 /// مجلد الملفات المنفردة (لا يُنشأ مجلد لملف واحد أبداً)
 pub const MISC_FOLDER: &str = "منوعات";
@@ -609,7 +609,8 @@ pub fn assign(tracks: &[Track], existing_dirs: &[String]) -> Vec<Assignment> {
             Assignment::Misc
         };
         let assignment = match assignment {
-            Assignment::Folder(name) => Assignment::Folder(sanitize_filename(&fix_mojibake(&name))),
+            // اسم المجلد ينظَّف مثل أسماء الملفات: ترميز مشوّه، "[AUD"، "(1)"...
+            Assignment::Folder(name) => Assignment::Folder(crate::organizer::OrganizerEngine::clean_string(&name)),
             other => other,
         };
         for &i in members {
