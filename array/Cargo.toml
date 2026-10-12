@@ -21,3 +21,16 @@ rayon = "1"
 
 [build-dependencies]
 winres = "0.1"
+
+# بناء التطوير: بدون معلومات تتبّع للمكتبات الخارجية (كانت تملأ المجلد بالغيغابايتات)
+# ومع تحسين سرعتها (نماذج الوجوه بطيئة جداً بدون تحسين)
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+opt-level = 2
+
+# النسخة النهائية: بدون رموز التتبّع داخل ملف exe
+[profile.release]
+strip = "debuginfo"
