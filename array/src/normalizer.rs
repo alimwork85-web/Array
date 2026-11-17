@@ -111,6 +111,15 @@ fn cp1252_byte(c: char) -> Option<u8> {
     MAP.iter().find(|(m, _)| *m == c).map(|(_, b)| *b)
 }
 
+/// أسماء محجوزة في ويندوز: ملف باسم CON أو NUL لا يُنشأ أصلاً
+const RESERVED_NAMES: [&str; 22] = [
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
+    "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
+/// أقصى طول لاسم الملف (مع الامتداد واللاحقة) حتى يبقى المسار الكامل داخل حد ويندوز
+const MAX_NAME_CHARS: usize = 120;
+
 pub fn sanitize_filename(name: &str) -> String {
     let invalid_chars = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
     let cleaned: String = name
@@ -119,7 +128,14 @@ pub fn sanitize_filename(name: &str) -> String {
         .collect();
 
     // ويندوز يحذف النقاط والمسافات في نهاية اسم الملف أو المجلد بصمت
-    let trimmed = cleaned.trim().trim_end_matches('.').trim().to_string();
+    let mut trimmed = cleaned.trim().trim_end_matches('.').trim().to_string();
+    // الاسم المحجوز يُستعمل مع إضافة تحفظه من الحجز
+    if RESERVED_NAMES.contains(&trimmed.to_lowercase().as_str()) {
+        trimmed.push('_');
+    }
+    if trimmed.chars().count() > MAX_NAME_CHARS {
+        trimmed = trimmed.chars().take(MAX_NAME_CHARS).collect::<String>().trim_end().to_string();
+    }
     if trimmed.is_empty() {
         "Unknown".to_string()
     } else {
@@ -157,5 +173,10 @@ mod tests {
     fn sanitize_removes_trailing_dots() {
         assert_eq!(sanitize_filename("name..."), "name");
         assert_eq!(sanitize_filename("a/b"), "ab");
+        // أسماء ويندوز المحجوزة وحد الطول
+        assert_eq!(sanitize_filename("CON"), "CON_");
+        assert_eq!(sanitize_filename("nul"), "nul_");
+        assert_eq!(sanitize_filename("CONSOLE"), "CONSOLE");
+        assert_eq!(sanitize_filename(&"ا".repeat(300)).chars().count(), 120);
     }
 }

@@ -12,7 +12,7 @@ use walkdir::WalkDir;
 
 use crate::i18n::tr;
 use crate::grouping::{self, Assignment, Track, DEFAULT_AI_MARKERS};
-use crate::naming;
+use crate::naming::{self, Kind, NamingGroup};
 use crate::normalizer::{fix_mojibake, looks_garbled, normalize_arabic, sanitize_filename, to_western_digits};
 use crate::safety::SafetyChecker;
 use crate::video;
@@ -52,6 +52,18 @@ pub struct Options {
     pub language: String,
     /// هل عُرضت شاشة الترحيب من قبل
     pub welcome_seen: bool,
+    /// مجموعة «أسماء رديئة»: ملفات اسمه لا يدل عليها تُسمّى من مصدرها الموثوق
+    pub rename_junk_names: bool,
+    /// مجموعة «صور ومقاطع واتساب»
+    pub rename_whatsapp_media: bool,
+    /// مجموعة «لقطات الشاشة»
+    pub rename_screenshots: bool,
+    /// مجموعة «أسماء الكاميرا»
+    pub rename_camera_names: bool,
+    /// مجموعة «تسجيلات صوتية»
+    pub rename_recordings: bool,
+    /// مجموعة «مستندات لها عنوان داخلي»
+    pub rename_documents_by_title: bool,
 }
 
 impl Default for Options {
@@ -65,6 +77,26 @@ impl Default for Options {
             appearance: "system".to_string(),
             language: "ar".to_string(),
             welcome_seen: false,
+            rename_junk_names: true,
+            rename_whatsapp_media: true,
+            rename_screenshots: true,
+            rename_camera_names: true,
+            rename_recordings: true,
+            rename_documents_by_title: true,
+        }
+    }
+}
+
+impl Options {
+    /// هل مجموعة التسمية هذه مفعّلة؟
+    fn naming_enabled(&self, group: NamingGroup) -> bool {
+        match group {
+            NamingGroup::Junk => self.rename_junk_names,
+            NamingGroup::Whatsapp => self.rename_whatsapp_media,
+            NamingGroup::Screenshot => self.rename_screenshots,
+            NamingGroup::Camera => self.rename_camera_names,
+            NamingGroup::Recording => self.rename_recordings,
+            NamingGroup::Document => self.rename_documents_by_title,
         }
     }
 }
@@ -115,8 +147,12 @@ struct RawFileInfo {
     track_index: Option<usize>,
     /// اسم الملف الجديد بدون الامتداد (منظَّف أو الأصلي حسب الإعدادات)
     new_stem: String,
-    /// الاسم لا يعبّر عن الملف (كود أو نص عشوائي): يُولَّد له اسم من السياق والتاريخ والمدة
-    needs_name: bool,
+    /// نوع الملف كما يهم التسمية
+    kind: Kind,
+    /// مجموعة التسمية؛ None يعني أن الاسم يبقى كما هو
+    naming_group: Option<NamingGroup>,
+    /// اسم من وسوم الصوت ("الفنان - العنوان") إن كانت الوسوم صالحة
+    audio_tag_name: Option<String>,
     /// سياق من الاسم العام نفسه ("تسجيل صوتي") إن وُجد
     placeholder_context: Option<String>,
     extension: String,
@@ -358,13 +394,16 @@ impl OrganizerEngine {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_string();
             let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
 
-            let (category, clean_name, track) = match Self::get_file_type(&ext) {
+            let file_type = Self::get_file_type(&ext);
+            let kind = Self::naming_kind(&file_type);
+            let (category, clean_name, track, audio_tag_name) = match file_type {
                 FileType::Audio => {
                     let (artist, title, tag_title) = Self::extract_audio_info(&path);
                     let (speaker, speaker_key) = Self::extract_group_key(&artist, &title, &keywords);
                     let speaker = (speaker_key != "single tracks").then_some(speaker);
                     let track = grouping::read_track(&path, source_path, music_dir, &artist, &title, speaker.as_deref(), &options.ai_markers);
-                    ("Music", Self::best_name(&stem, tag_title), Some(track))
+                    let tag_name = tag_title.clone().map(|t| Self::tag_name(&artist, &t));
+                    ("Music", Self::best_name(&stem, tag_title), Some(track), tag_name)
                 }
                 other => {
                     let category = match other {
@@ -373,7 +412,7 @@ impl OrganizerEngine {
                         FileType::Document => "Documents",
                         _ => "Archives",
                     };
-                    (category, Self::clean_string(&stem), None)
+                    (category, Self::clean_string(&stem), None, None)
                 }
             };
             // بدون إعادة تسمية يبقى الاسم والامتداد كما هما تماماً
@@ -383,7 +422,7 @@ impl OrganizerEngine {
                 (stem, ext)
             };
 
-            let needs_name = options.rename_files && naming::is_junk_name(&new_stem);
+            let naming_group = options.rename_files.then(|| naming::naming_group(&path, &new_stem, kind)).flatten();
             let placeholder_context = naming::placeholder_context(&new_stem);
             let track_index = track.map(|t| {
                 tracks.push(t);
@@ -394,7 +433,9 @@ impl OrganizerEngine {
                 category: category.to_string(),
                 track_index,
                 new_stem,
-                needs_name,
+                kind,
+                naming_group,
+                audio_tag_name,
                 placeholder_context,
                 extension,
             });
@@ -419,20 +460,6 @@ impl OrganizerEngine {
             Some(Assignment::Misc) => misc_dir.clone(),
             None => category_dirs[f.category.as_str()].clone(),
         };
-        // سياق الملف من مجلده الأصلي ("house lo [AUD" → "house lo") إن لم يكن مجلداً عاماً
-        let category_paths: Vec<&PathBuf> = category_dirs.values().collect();
-        let folder_context = |path: &Path| -> Option<String> {
-            let parent = path.parent()?;
-            if parent == source_path || category_paths.contains(&&parent.to_path_buf()) || parent == misc_dir {
-                return None;
-            }
-            let name = parent.file_name()?.to_string_lossy().to_string();
-            if matches!(name.trim().to_lowercase().as_str(), "single tracks" | "unknown") {
-                return None;
-            }
-            let clean = Self::clean_string(&name);
-            (!naming::is_junk_name(&clean)).then_some(clean)
-        };
         // مجلدات المستخدم الموجودة لا تُلمس: ملفاتها تبقى كما هي بالاسم والمكان
         let kept = |path: &Path| -> bool {
             let Ok(relative) = path.strip_prefix(source_path) else { return false };
@@ -450,24 +477,8 @@ impl OrganizerEngine {
             .into_iter()
             .map(|mut f| {
                 let dir = target_dir(&f);
-                if f.needs_name {
-                    let group_context = match f.track_index.map(|i| &assignments[i]) {
-                        Some(Assignment::Folder(name)) => Some(name.clone()),
-                        Some(Assignment::Ai) => Some("AI Music".to_string()),
-                        _ => None,
-                    };
-                    let category_word = match f.category.as_str() {
-                        "Music" => "Audio",
-                        "Pictures" => "Photo",
-                        "Videos" => "Video",
-                        "Documents" => "Document",
-                        _ => "Archive",
-                    };
-                    let context = group_context
-                        .or_else(|| folder_context(&f.path))
-                        .or_else(|| f.placeholder_context.clone())
-                        .unwrap_or_else(|| category_word.to_string());
-                    f.new_stem = sanitize_filename(&naming::generated_name(&context, &f.path));
+                if let Some(name) = Self::trusted_name(&f, options) {
+                    f.new_stem = name;
                 }
                 (f, dir)
             })
@@ -608,6 +619,60 @@ impl OrganizerEngine {
         }
     }
 
+    /// نوع التسمية المقابل لنوع الملف
+    fn naming_kind(file_type: &FileType) -> Kind {
+        match file_type {
+            FileType::Image => Kind::Image,
+            FileType::Video => Kind::Video,
+            FileType::Audio => Kind::Audio,
+            FileType::Document => Kind::Document,
+            FileType::Archive | FileType::Other => Kind::Other,
+        }
+    }
+
+    /// اسم من وسوم الصوت: "الفنان - العنوان"، والفنان يُرفض إن كان مجهولاً أو كوداً
+    fn tag_name(artist: &str, title: &str) -> String {
+        let title = Self::clean_string(title);
+        let artist = Self::clean_string(artist);
+        let artist_ok = !artist.is_empty()
+            && !artist.to_lowercase().contains("unknown")
+            && !naming::is_junk_name(&artist);
+        if artist_ok { format!("{artist} - {title}") } else { title }
+    }
+
+    /// الاسم الجديد من مصدر موثوق فقط؛ None يعني أن الاسم يبقى كما هو.
+    /// لا مصدر ← لا تسمية، وتاريخ آخر تعديل ليس مصدراً.
+    fn trusted_name(f: &RawFileInfo, options: &Options) -> Option<String> {
+        let group = f.naming_group.filter(|g| options.naming_enabled(*g))?;
+        let name = match f.kind {
+            Kind::Document => naming::document_title(&f.path)?,
+            Kind::Audio => match f.audio_tag_name.as_deref().filter(|t| !naming::is_junk_name(t)) {
+                Some(tag_name) => tag_name.to_string(),
+                None => {
+                    let (date, _) = naming::trusted_date(&f.path, Kind::Audio)?;
+                    let word = f.placeholder_context.clone().unwrap_or_else(|| "تسجيل صوتي".to_string());
+                    naming::join_name(&date, Some(&word))
+                }
+            },
+            _ => {
+                let (date, _) = naming::trusted_date(&f.path, f.kind)?;
+                let tag = match group {
+                    NamingGroup::Whatsapp => Some("واتساب".to_string()),
+                    NamingGroup::Screenshot => Some("لقطة شاشة".to_string()),
+                    // أسماء الكاميرا تحتفظ برقمها الأصلي
+                    NamingGroup::Camera => f.path.file_stem().map(|s| s.to_string_lossy().to_string()),
+                    _ => None,
+                };
+                naming::join_name(&date, tag.as_deref())
+            }
+        };
+        let clean = match f.kind {
+            Kind::Document | Kind::Audio => Self::clean_string(&name),
+            _ => sanitize_filename(&name),
+        };
+        (!clean.is_empty()).then_some(clean)
+    }
+
     /// يرجع (عمليات النقل، عدد الملفات الموجودة أصلاً في مكانها الصحيح)
     fn plan_moves(files: Vec<(RawFileInfo, PathBuf)>) -> (Vec<PlannedMove>, usize) {
         // أسماء محجوزة داخل الخطة نفسها (بأحرف صغيرة لأن أسماء ويندوز لا تفرّق بين الحالة)
@@ -723,6 +788,53 @@ pub(crate) mod tests {
         root
     }
 
+    /// صورة JPEG صغيرة فيها EXIF: DateTimeOriginal داخل Exif IFD كما في الصور الحقيقية
+    pub(crate) fn jpeg_with_date(path: &Path, date: &str) {
+        let mut tiff = Vec::new();
+        tiff.extend(b"II* ");
+        tiff.extend(8u32.to_le_bytes()); // IFD0 عند البايت 8
+        // IFD0: مؤشر واحد إلى Exif IFD (0x8769) عند البايت 26
+        tiff.extend(1u16.to_le_bytes());
+        tiff.extend(0x8769u16.to_le_bytes());
+        tiff.extend(4u16.to_le_bytes());
+        tiff.extend(1u32.to_le_bytes());
+        tiff.extend(26u32.to_le_bytes());
+        tiff.extend(0u32.to_le_bytes());
+        // Exif IFD: DateTimeOriginal (0x9003) والنص عند البايت 44
+        tiff.extend(1u16.to_le_bytes());
+        tiff.extend(0x9003u16.to_le_bytes());
+        tiff.extend(2u16.to_le_bytes());
+        tiff.extend(20u32.to_le_bytes());
+        tiff.extend(44u32.to_le_bytes());
+        tiff.extend(0u32.to_le_bytes());
+        let mut text = format!("{date} ").into_bytes();
+        text.resize(20, 0);
+        tiff.extend(text);
+        let mut app1 = b"Exif  ".to_vec();
+        app1.extend(tiff);
+        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE1];
+        jpeg.extend(((app1.len() + 2) as u16).to_be_bytes());
+        jpeg.extend(app1);
+        jpeg.extend([0xFF, 0xD9]);
+        fs::write(path, jpeg).unwrap();
+    }
+
+    /// ملف PDF أدنى فيه قاموس /Title
+    pub(crate) fn pdf_with_title(path: &Path, title: &str) {
+        fs::write(
+            path,
+            format!("%PDF-1.4
+1 0 obj
+<< /Title ({title}) >>
+endobj
+trailer
+<< /Root 1 0 R >>
+%%EOF
+"),
+        )
+        .unwrap();
+    }
+
     fn organize(root: &Path, options: &Options) -> (Plan, RunResult) {
         let plan = OrganizerEngine::plan(root, options).unwrap();
         let progress = AtomicUsize::new(0);
@@ -770,8 +882,8 @@ pub(crate) mod tests {
         assert!(result.failed.is_empty());
         let files = tree(&root);
         // مجلد السنة الموجود ("فيديو 2019") يُستخدم بدل إنشاء "2019"
-        assert!(files.contains(&"Videos/فيديو 2019/Video - 2019-07-04 10-10.mp4".to_string()), "{files:?}");
-        assert!(files.contains(&"Videos/2021/VID-20210101-WA0001.mp4".to_string()), "{files:?}");
+        assert!(files.contains(&"Videos/فيديو 2019/2019-07-04 10-10.mp4".to_string()), "{files:?}");
+        assert!(files.contains(&"Videos/2021/2021-01-01 واتساب.mp4".to_string()), "{files:?}");
         // الصورة الحية: الفيديو بجانب صورته وبنفس اسمها
         assert!(files.contains(&"Pictures/IMG 0548.heic".to_string()) && files.contains(&"Pictures/IMG 0548.mov".to_string()), "{files:?}");
         // بلا تاريخ معروف: يبقى في مجلد الفيديو نفسه
@@ -784,7 +896,7 @@ pub(crate) mod tests {
         let root = temp_tree("videos_off", &["20190704_101010.mp4"]);
         let (_, result) = organize(&root, &Options { videos_by_year: false, ..Options::default() });
         assert!(result.failed.is_empty());
-        assert_eq!(tree(&root), ["Videos/Video - 2019-07-04 10-10.mp4"]);
+        assert_eq!(tree(&root), ["Videos/2019-07-04 10-10.mp4"]);
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -970,7 +1082,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn meaningless_names_get_a_name_from_their_context() {
+    fn meaningless_names_stay_without_a_trusted_source() {
+        // المرحلة 2: بلا EXIF وبلا تاريخ في الاسم لا تسمية (تاريخ التعديل مرفوض)
         // مثل D:\Music عند المستخدم: المجلد المختار هو مجلد الموسيقى نفسه
         let root = temp_tree("junk", &[
             "Music/house lo [AUD/4749d951].mp3",
@@ -984,13 +1097,95 @@ pub(crate) mod tests {
         organize(&music, &rebuild());
 
         let files = tree(&music);
-        // مجلد "house lo [AUD" يُنظَّف اسمه، وملفاته تأخذ اسماً من سياقها
-        assert_eq!(files.iter().filter(|f| f.starts_with("house lo/house lo - 20")).count(), 2, "{files:?}");
-        assert!(files.iter().any(|f| f.starts_with("منوعات/Audio - 20")), "{files:?}");
-        assert!(files.iter().any(|f| f.starts_with("Videos/Video - 20")), "{files:?}");
+        // الأسماء الرديئة تبقى كما هي: لا مصدر موثوق لاسم جديد
+        assert!(files.contains(&"house lo/4749d951].mp3".to_string()), "{files:?}");
+        assert!(files.contains(&"house lo/0750707c].mp3".to_string()), "{files:?}");
+        assert!(files.contains(&"منوعات/14c58cdd].mp3".to_string()), "{files:?}");
+        // ولا تاريخ تعديل يُضاف إلى أي اسم
+        assert!(!files.iter().any(|f| f.contains(" - 20")), "{files:?}");
         // الاسم المفهوم لا يتغير
         assert!(files.contains(&"منوعات/Ma Yehtaj.mp3".to_string()), "{files:?}");
-        assert!(!files.iter().any(|f| f.contains("]")), "{files:?}");
+        assert!(files.contains(&"Videos/YouTube.mp4".to_string()), "{files:?}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_file_with_only_a_modified_date_is_not_renamed() {
+        let root = temp_tree("modified_only", &["4749d951.jpg", "scan1.png"]);
+        jpeg_with_date(&root.join("4749d951.jpg"), "2024:05:12 14:30:05");
+        // scan1.png ملف فارغ: له تاريخ تعديل فقط
+        organize(&root, &rebuild());
+        let files = tree(&root);
+        assert!(files.contains(&"Pictures/scan1.png".to_string()), "{files:?}");
+        // الصورة التي لها EXIF تُسمّى
+        assert!(files.contains(&"Pictures/2024-05-12 14-30-05.jpg".to_string()), "{files:?}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_template_title_is_not_used_as_a_name() {
+        let root = temp_tree("template_title", &[]);
+        pdf_with_title(&root.join("4749d951.pdf"), "Microsoft Word - Document1");
+        organize(&root, &rebuild());
+        assert!(tree(&root).contains(&"Documents/4749d951.pdf".to_string()), "{:?}", tree(&root));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_document_gets_its_internal_title() {
+        let root = temp_tree("doc_title", &[]);
+        pdf_with_title(&root.join("4749d951.pdf"), "Annual Report 2024");
+        organize(&root, &rebuild());
+        assert!(tree(&root).contains(&"Documents/Annual Report 2024.pdf".to_string()), "{:?}", tree(&root));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn camera_names_keep_their_original_number() {
+        let root = temp_tree("camera", &[]);
+        jpeg_with_date(&root.join("IMG_2353.jpg"), "2024:05:12 14:30:05");
+        organize(&root, &rebuild());
+        assert!(
+            tree(&root).contains(&"Pictures/2024-05-12 14-30-05 IMG_2353.jpg".to_string()),
+            "{:?}",
+            tree(&root)
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn whatsapp_and_screenshot_files_get_their_label() {
+        let root = temp_tree("labels", &["IMG-20240512-WA0003.jpg", "Screenshot 2024-05-12 143005.png"]);
+        organize(&root, &rebuild());
+        let files = tree(&root);
+        // اسم واتساب يحمل التاريخ بلا وقت، واللقطة تحمل الوقت
+        assert!(files.contains(&"Pictures/2024-05-12 واتساب.jpg".to_string()), "{files:?}");
+        assert!(files.contains(&"Pictures/2024-05-12 14-30 لقطة شاشة.png".to_string()), "{files:?}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn ten_photos_in_the_same_second_get_ten_names() {
+        let root = temp_tree("same_second", &[]);
+        for i in 1..=10 {
+            jpeg_with_date(&root.join(format!("scan{i}.jpg")), "2024:05:12 14:30:05");
+        }
+        let plan = OrganizerEngine::plan(&root, &rebuild()).unwrap();
+        assert_eq!(plan.moves.len(), 10);
+        let targets: HashSet<String> = plan.moves.iter().map(|m| m.to.to_string_lossy().to_lowercase()).collect();
+        assert_eq!(targets.len(), 10, "أسماء مكررة: {targets:?}");
+        assert!(plan.moves.iter().all(|m| !m.to.exists() || m.to == m.from));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_disabled_group_keeps_its_files_unnamed() {
+        let root = temp_tree("group_off", &["IMG-20240512-WA0003.jpg", "scan1.jpg"]);
+        jpeg_with_date(&root.join("scan1.jpg"), "2024:05:12 14:30:05");
+        organize(&root, &Options { rename_whatsapp_media: false, ..rebuild() });
+        let files = tree(&root);
+        assert!(files.contains(&"Pictures/IMG-20240512-WA0003.jpg".to_string()), "{files:?}");
+        assert!(files.contains(&"Pictures/2024-05-12 14-30-05.jpg".to_string()), "{files:?}");
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1027,7 +1222,8 @@ pub(crate) mod tests {
         // المجلد المختار اسمه Photo فهو مجلد الصور نفسه: الصور المتفرقة تبقى فيه، والباقي لمجلده
         let files = tree(&photo);
         assert!(files.contains(&"IMG 0612.jpg".to_string()), "{files:?}");
-        assert!(files.iter().any(|f| f.starts_with("Photo - 20")), "{files:?}");
+        // بلا مصدر موثوق يبقى الاسم الرديء كما هو
+        assert!(files.contains(&"133649 466985853345771 200500525.jpg".to_string()), "{files:?}");
         assert!(files.contains(&"Videos/trip.mp4".to_string()), "{files:?}");
         assert!(files.contains(&"Documents/cv.pdf".to_string()), "{files:?}");
         assert!(!photo.join("Pictures").exists());
