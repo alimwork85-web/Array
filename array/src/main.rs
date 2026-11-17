@@ -1691,6 +1691,63 @@ mod tests {
         assert!(storage.load_undo().unwrap().is_none(), "سجل AppData لم يُمسح بعد نجاح التراجع");
     }
 
+    /// اختبار دخاني على مسار المستخدم نفسه: اختيار مجلد → معاينة → تنظيم → تراجع.
+    /// يقود دوال الواجهة الحقيقية (planning/execute/undo + poll_job) بلا نافذة.
+    #[test]
+    fn interface_smoke_test_organize_then_undo() {
+        let root = temp_tree("ui_smoke", &["1.pdf", "a/2.pdf", "clip.mp4", "sea.jpg"]);
+        let before = tree(&root);
+        let ctx = egui::Context::default();
+        let mut app = ArrayApp::new(&ctx, Storage::at(temp_tree("ui_smoke_appdata", &[])));
+
+        app.select_folder(root.clone());
+        app.start_planning(&ctx, root.clone());
+        wait_for_job(&mut app);
+
+        let plan = app.preview.take().expect("لم تُعرض المعاينة").plan;
+        let moves = plan.moves.len();
+        assert!(moves > 0);
+        assert_eq!(app.undo_count, None, "زر التراجع ظاهر قبل التنظيم");
+
+        app.start_organizing(&ctx, plan);
+        wait_for_job(&mut app);
+        assert_eq!(app.outcome.as_ref().map(|o| o.ok), Some(true), "{}", app.status_message);
+        assert_ne!(tree(&root), before, "لم يتحرك أي ملف");
+        assert_eq!(app.undo_count, Some(moves), "زر التراجع لم يظهر بعد التنظيم");
+
+        app.start_undo(&ctx);
+        wait_for_job(&mut app);
+        assert_eq!(app.outcome.as_ref().map(|o| o.ok), Some(true), "{}", app.status_message);
+        assert_eq!(tree(&root), before, "التراجع لم يعيد الشجرة كما كانت");
+        assert_eq!(app.undo_count, None, "زر التراجع بقي بعد نجاحه");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// كل الملفات تحت المجلد (بلا `.array`) لمرتبة — للمقارنة قبل وبعد
+    fn tree(root: &Path) -> Vec<String> {
+        let mut files: Vec<String> = walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.path().strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"))
+            .filter(|f| !f.starts_with(".array/"))
+            .collect();
+        files.sort();
+        files
+    }
+
+    /// انتظار انتهاء عمل الخلفية عبر نفس دالة الواجهة
+    fn wait_for_job(app: &mut ArrayApp) {
+        for _ in 0..300 {
+            app.poll_job();
+            if app.job.is_none() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!("لم ينتهِ العمل في الوقت المتوقع");
+    }
+
     #[test]
     fn undo_targets_the_moved_folder_not_the_stored_path() {
         let root = temp_tree("undo_target", &["1.pdf", "a/2.pdf", "clip.mp4"]);
