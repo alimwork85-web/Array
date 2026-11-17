@@ -17,7 +17,7 @@ use eframe::egui::{self, RichText};
 
 use i18n::{ar, count, tr, Noun};
 use icons::Icon;
-use organizer::{Journal, Options, OrganizerEngine, Plan, Summary};
+use organizer::{Journal, Options, OrganizerEngine, Plan, RunResult, Summary};
 use naming::NamingGroup;
 use safety::SafetyChecker;
 use rfd::FileDialog;
@@ -99,6 +99,35 @@ fn spawn_job<T: Send + 'static>(ctx: &egui::Context, work: impl FnOnce() -> T + 
         ctx.request_repaint();
     });
     rx
+}
+
+/// تراجع: بيان المجلد أولًا (يعمل بلا سجل AppData)، وإن كان تالفًا أو بائتًا فسجل AppData.
+fn undo_folder(folder: &Path, storage: &Storage, counter: &AtomicUsize) -> Result<RunResult, String> {
+    let has_journal = OrganizerEngine::has_journal(folder);
+    if let Some(result) = has_journal.then(|| OrganizerEngine::undo_from_journal(folder, counter)).flatten() {
+        // بيان بائت (لا مدخل done فيه) يُنجز صفرًا: لا يُمسح السجل الصحيح، ويُجرَّب بعده
+        if !result.done.is_empty() || !result.failed.is_empty() {
+            if result.failed.is_empty() {
+                storage.clear_undo()?;
+            }
+            return Ok(result);
+        }
+    }
+    let Some(log) = storage.load_undo()? else {
+        return Err(if has_journal {
+            tr("The record in this folder is damaged.", "البيان في هذا المجلد تالف.").to_string()
+        } else {
+            tr("There is nothing to undo.", "لا يوجد ما يمكن التراجع عنه.").to_string()
+        });
+    };
+    let result = OrganizerEngine::undo(&log.moves, &log.source, &log.created_dirs, counter);
+    // الملفات التي لم تُرجع تبقى في السجل لإعادة المحاولة
+    if result.failed.is_empty() {
+        storage.clear_undo()?;
+    } else {
+        storage.save_undo(&UndoLog { source: log.source.clone(), moves: result.failed.clone(), created_dirs: log.created_dirs.clone() })?;
+    }
+    Ok(result)
 }
 
 /// قراءة نتيجة العمل إن انتهى؛ توقف الخيط بشكل غير متوقع يُعامل كخطأ
@@ -450,27 +479,7 @@ impl ArrayApp {
         let storage = self.storage.clone();
         let counter = progress.clone();
         let rx = spawn_job(ctx, move || {
-            // البيان داخل المجلد أولاً: يعمل حتى لو حُذف سجل AppData أو أُعيد تثبيت البرنامج
-            let result = if OrganizerEngine::has_journal(&folder) {
-                let result = OrganizerEngine::undo_from_journal(&folder, &counter)
-                    .ok_or_else(|| tr("The record in this folder is damaged.", "البيان في هذا المجلد تالف.").to_string())?;
-                if result.failed.is_empty() {
-                    storage.clear_undo()?;
-                }
-                result
-            } else {
-                let Some(log) = storage.load_undo()? else {
-                    return Err(tr("There is nothing to undo.", "لا يوجد ما يمكن التراجع عنه.").to_string());
-                };
-                let result = OrganizerEngine::undo(&log.moves, &log.source, &log.created_dirs, &counter);
-                // الملفات التي لم تُرجع تبقى في السجل لإعادة المحاولة
-                if result.failed.is_empty() {
-                    storage.clear_undo()?;
-                } else {
-                    storage.save_undo(&UndoLog { source: log.source.clone(), moves: result.failed.clone(), created_dirs: log.created_dirs.clone() })?;
-                }
-                result
-            };
+            let result = undo_folder(&folder, &storage, &counter)?;
 
             let done = count(result.done.len(), Noun::File);
             let mut msg = if ar() {
@@ -1630,6 +1639,53 @@ impl eframe::App for ArrayApp {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::organizer::PlannedMove;
+    use crate::organizer::tests::temp_tree;
+    use std::fs;
+
+    /// ملف نُقل إلى `docs/` + سجل AppData صحيح + بيان مجلد بائت أو تالف
+    fn undo_setup(name: &str) -> (PathBuf, Storage) {
+        let root = temp_tree(&format!("undo_{name}"), &["a.txt"]);
+        let moved = PlannedMove { from: root.join("a.txt"), to: root.join("docs/a.txt") };
+        fs::create_dir_all(root.join("docs")).unwrap();
+        fs::rename(&moved.from, &moved.to).unwrap();
+        let storage = Storage::at(root.join(".appdata"));
+        let log = UndoLog { source: root.clone(), moves: vec![moved.clone()], created_dirs: vec![root.join("docs")] };
+        storage.save_undo(&log).unwrap();
+        if name == "stale" {
+            Journal::new(&root, &[moved], &[root.join("docs")]).save().unwrap();
+        } else {
+            fs::create_dir_all(root.join(".array")).unwrap();
+            fs::write(Journal::path(&root), "تالف {").unwrap();
+        }
+        (root, storage)
+    }
+
+    fn assert_undone(root: &Path, storage: &Storage) {
+        assert!(root.join("a.txt").is_file(), "الملف لم يُرجع");
+        assert!(!root.join("docs/a.txt").exists());
+        assert!(storage.load_undo().unwrap().is_none(), "سجل AppData لم يُمسح بعد نجاح التراجع");
+    }
+
+    #[test]
+    fn a_damaged_journal_falls_back_to_the_appdata_log() {
+        let (root, storage) = undo_setup("damaged");
+        let result = undo_folder(&root, &storage, &AtomicUsize::new(0)).unwrap();
+        assert_eq!(result.done.len(), 1);
+        assert_undone(&root, &storage);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_stale_journal_falls_back_and_keeps_the_appdata_log_until_done() {
+        let (root, storage) = undo_setup("stale");
+        let result = undo_folder(&root, &storage, &AtomicUsize::new(0)).unwrap();
+        assert_eq!(result.done.len(), 1);
+        assert_undone(&root, &storage);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn app_icon_decodes() {
         let icon = super::load_app_icon();
