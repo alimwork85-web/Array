@@ -101,6 +101,35 @@ fn spawn_job<T: Send + 'static>(ctx: &egui::Context, work: impl FnOnce() -> T + 
     rx
 }
 
+/// سجل التراجع جاهزًا للتنفيذ: لو نُقل مجلد التنظيم بعد الترتيب تُبنى مساراته إلى مكانه الحالي
+fn undo_log_for(storage: &Storage, folder: Option<&Path>) -> Result<Option<UndoLog>, String> {
+    let Some(log) = storage.load_undo()? else {
+        return Ok(None);
+    };
+    // يُستعمل المكان المختار فقط إذا كان يحمل بيان المجلد نفسه، فلا تُخمَّن المسارات
+    let moved_to = folder.filter(|p| !log.source.exists() && Journal::load(p).is_some_and(|j| j.source == log.source));
+    Ok(Some(match moved_to {
+        Some(current) => log.rebased(current),
+        None => log,
+    }))
+}
+
+/// (سجلات التراجع، عدد ما يمكن إرجاعه، مجلد التراجع): سجل AppData أولًا ثم بيان المجلد المختار
+fn undo_state(storage: &Storage, selected: Option<&Path>) -> Result<(usize, usize, Option<PathBuf>), String> {
+    if let Some(log) = undo_log_for(storage, selected)? {
+        let movable = log.moves.iter().filter(|m| m.to.exists()).count();
+        return Ok((log.moves.len(), movable, Some(log.source)));
+    }
+    let Some((folder, journal)) = selected
+        .filter(|p| OrganizerEngine::has_journal(p))
+        .and_then(|p| Journal::load(p).map(|j| (p, j)))
+    else {
+        return Ok((0, 0, None));
+    };
+    let movable = journal.restorable(folder);
+    Ok((movable, movable, Some(folder.to_path_buf())))
+}
+
 /// تراجع: بيان المجلد أولًا (يعمل بلا سجل AppData)، وإن كان تالفًا أو بائتًا فسجل AppData.
 fn undo_folder(folder: &Path, storage: &Storage, counter: &AtomicUsize) -> Result<RunResult, String> {
     let has_journal = OrganizerEngine::has_journal(folder);
@@ -113,7 +142,7 @@ fn undo_folder(folder: &Path, storage: &Storage, counter: &AtomicUsize) -> Resul
             return Ok(result);
         }
     }
-    let Some(log) = storage.load_undo()? else {
+    let Some(log) = undo_log_for(storage, Some(folder))? else {
         return Err(if has_journal {
             tr("The record in this folder is damaged.", "البيان في هذا المجلد تالف.").to_string()
         } else {
@@ -287,34 +316,14 @@ impl ArrayApp {
 
     fn refresh_undo(&mut self) {
         // بعد تنظيم توقف في المنتصف يحتوي السجل ملفات لم تُنقل، فلا تُحسب
-        let (entries, movable, source) = match self.storage.load_undo() {
-            Ok(Some(log)) => (log.moves.len(), log.moves.iter().filter(|m| m.to.exists()).count(), Some(log.source)),
-            Ok(None) => (0, 0, None),
+        match undo_state(&self.storage, self.selected_path.as_deref()) {
+            Ok((entries, movable, source)) => {
+                self.undo_entries = entries;
+                self.undo_count = Some(movable).filter(|&n| n > 0);
+                self.undo_source = source;
+            }
             Err(err) => {
                 self.status_message = format!("⚠ {}", err);
-                (0, 0, None)
-            }
-        };
-        if entries > 0 {
-            self.undo_entries = entries;
-            self.undo_count = Some(movable).filter(|&n| n > 0);
-            self.undo_source = source;
-            return;
-        }
-        // لا سجل AppData: يُقرأ البيان من المجلد المختار نفسه (بعد حذف السجل أو إعادة التثبيت)
-        let from_journal = self
-            .selected_path
-            .as_ref()
-            .filter(|p| OrganizerEngine::has_journal(p))
-            .and_then(|p| Journal::load(p));
-        match from_journal {
-            Some(journal) => {
-                let moved = journal.entries.iter().filter(|e| e.done && e.to.exists()).count();
-                self.undo_entries = moved;
-                self.undo_count = Some(moved).filter(|&n| n > 0);
-                self.undo_source = Some(journal.source);
-            }
-            None => {
                 self.undo_entries = 0;
                 self.undo_count = None;
                 self.undo_source = None;
@@ -462,6 +471,13 @@ impl ArrayApp {
                     format!("\n⚠ {} could not be moved (in use, access denied, or a file with the same name appeared) and were left in place.", failed)
                 });
             }
+            if let Some(warning) = &result.warning {
+                msg.push_str(&if ar() {
+                    format!("\n⚠ رُتّبت الملفات لكن تعذّر كتابة بيانها داخل المجلد ({}). التراجع متاح من سجل البرنامج.", warning)
+                } else {
+                    format!("\n⚠ Files were organized, but their record inside the folder could not be written ({}). Undo is still available from the app's log.", warning)
+                });
+            }
             if let Err(e) = saved {
                 msg.push_str(&format!("\n⚠ {}", e));
             }
@@ -493,6 +509,13 @@ impl ArrayApp {
                     format!("\n⚠ تعذّرت إعادة {} (نُقل أو أُعيدت تسميته أو مفتوح أو يوجد ملف جديد بنفس الاسم). اضغط تراجع مرة أخرى لإعادة المحاولة.", failed)
                 } else {
                     format!("\n⚠ {} could not be restored (moved, renamed, in use, or a new file has the same name). Press Undo again to retry them.", failed)
+                });
+            }
+            if let Some(warning) = &result.warning {
+                msg.push_str(&if ar() {
+                    format!("\n⚠ أُعيدت الملفات لكن تعذّر تحديث بيان المجلد ({}).", warning)
+                } else {
+                    format!("\n⚠ Files were restored, but the folder's record could not be updated ({}).", warning)
                 });
             }
             Ok(msg)
@@ -1666,6 +1689,37 @@ mod tests {
         assert!(root.join("a.txt").is_file(), "الملف لم يُرجع");
         assert!(!root.join("docs/a.txt").exists());
         assert!(storage.load_undo().unwrap().is_none(), "سجل AppData لم يُمسح بعد نجاح التراجع");
+    }
+
+    #[test]
+    fn undo_targets_the_moved_folder_not_the_stored_path() {
+        let root = temp_tree("undo_target", &["1.pdf", "a/2.pdf", "clip.mp4"]);
+        let storage = Storage::at(temp_tree("undo_target_appdata", &[]));
+        let options = Options { keep_existing_folders: false, ..Options::default() };
+        let plan = OrganizerEngine::plan(&root, &options).unwrap();
+        let result = OrganizerEngine::execute(&plan, &AtomicUsize::new(0));
+        assert_eq!(result.done.len(), plan.moves.len());
+        storage
+            .save_undo(&UndoLog { source: root.clone(), moves: result.done.clone(), created_dirs: plan.new_dirs.clone() })
+            .unwrap();
+
+        // المستخدم نقل مجلد التنظيم بعد الترتيب: السجل والبيان يشيران إلى المكان القديم
+        let moved = root.with_file_name(format!("{}_moved", root.file_name().unwrap().to_string_lossy()));
+        let _ = fs::remove_dir_all(&moved);
+        fs::rename(&root, &moved).unwrap();
+
+        let (entries, movable, source) = undo_state(&storage, Some(&moved)).unwrap();
+        assert_eq!(source.as_deref(), Some(moved.as_path()), "التراجع ما زال يشير إلى المسار القديم");
+        assert_eq!(entries, movable);
+        assert!(movable > 0);
+
+        let log = undo_log_for(&storage, Some(&moved)).unwrap().unwrap();
+        assert_eq!(log.source, moved);
+        let undone = OrganizerEngine::undo(&log.moves, &log.source, &log.created_dirs, &AtomicUsize::new(0));
+        assert!(undone.failed.is_empty(), "{:?}", undone.failed);
+        assert_eq!(undone.done.len(), log.moves.len());
+        assert!(!root.exists(), "لم يُنشأ المسار القديم من جديد");
+        fs::remove_dir_all(&moved).unwrap();
     }
 
     #[test]

@@ -16,6 +16,18 @@ pub struct UndoLog {
     pub created_dirs: Vec<PathBuf>,
 }
 
+impl UndoLog {
+    /// نسخة بمسارات مُعاد بناؤها داخل `current` — بعد أن ينقل المستخدم مجلد التنظيم
+    pub fn rebased(&self, current: &Path) -> Self {
+        let at = |p: &PathBuf| crate::organizer::rebased(current, &self.source, p);
+        Self {
+            source: current.to_path_buf(),
+            moves: self.moves.iter().map(|m| PlannedMove { from: at(&m.from), to: at(&m.to) }).collect(),
+            created_dirs: self.created_dirs.iter().map(at).collect(),
+        }
+    }
+}
+
 /// ملفات البرنامج في %APPDATA%\Array: الإعدادات وسجل التراجع
 #[derive(Clone)]
 pub struct Storage {

@@ -206,6 +206,12 @@ pub struct JournalEntry {
     pub done: bool,
 }
 
+/// مسار مخزَّن وقت التنظيم → مكانه داخل `current` إن كان تحت `source` الأصلي.
+/// المجلد قد يكون نُقل بعد التنظيم، فتُبنى المسارات نسبةً إلى مكانه الحالي.
+pub fn rebased(current: &Path, source: &Path, p: &Path) -> PathBuf {
+    p.strip_prefix(source).map(|r| current.join(r)).unwrap_or_else(|_| p.to_path_buf())
+}
+
 /// مجلد بيانات Array داخل المجلد المرتَّب
 pub const JOURNAL_DIR: &str = ".array";
 
@@ -224,6 +230,11 @@ impl Journal {
             created_dirs: created_dirs.to_vec(),
             entries: moves.iter().map(|m| JournalEntry { from: m.from.clone(), to: m.to.clone(), done: false }).collect(),
         }
+    }
+
+    /// عدد الملفات التي يمكن إرجاعها من هذا المكان (بعد نقل المجلد تُحسب نسبتًا إلى `current`)
+    pub fn restorable(&self, current: &Path) -> usize {
+        self.entries.iter().filter(|e| e.done && rebased(current, &self.source, &e.to).exists()).count()
     }
 
     /// يُعاد كتابة الملف كاملاً بعد كل عملية (بسيط ومقبول لحجم مجلد عادي؛
@@ -290,6 +301,8 @@ pub struct RunResult {
     pub failed: Vec<PlannedMove>,
     /// في التراجع: ملفات كانت في مكانها الأصلي أصلاً (تنظيم توقف قبل نقلها)
     pub unchanged: usize,
+    /// تحذير لا يمنع النقل لكن يجب أن يعرفه المستخدم (مثل تعذّر كتابة بيان المجلد)
+    pub warning: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -909,7 +922,10 @@ impl OrganizerEngine {
         let mut result = RunResult::default();
         // البيان يُكتب قبل أول عملية: لو انقطع التنفيذ يُعرف ما تحرّك وما لم يتحرك
         let mut journal = Journal::new(&plan.source, &plan.moves, &plan.new_dirs);
-        let _ = journal.save();
+        // فشل الكتابة لا يوقف النقل (سجل AppData مكتوب قبل التنفيذ) لكنه يُبلَّغ للمستخدم
+        if let Err(e) = journal.save() {
+            result.warning = Some(e);
+        }
         let lower = |p: &Path| p.to_string_lossy().to_lowercase();
         // أهداف تطابق مصادر أخرى تعني تبديلاً (photo.jpg ↔ photo (1).jpg):
         // تُنقل هذه الملفات أولاً إلى اسم مؤقت ثم إلى هدفها، فلا يتبادل ملفان اسميهما.
@@ -931,7 +947,10 @@ impl OrganizerEngine {
                 if let Some(entry) = journal.entries.iter_mut().find(|e| e.from == m.from && e.to == m.to) {
                     entry.done = true;
                 }
-                let _ = journal.save();
+                if let Err(e) = journal.save() {
+                    // بعد نقل ناجح: النقل محفوظ في سجل AppData، والتحذير يكفي
+                    result.warning.get_or_insert(e);
+                }
                 result.done.push(m.clone());
             } else {
                 // فشل: أعِد الملف من الاسم المؤقت إلى مكانه الأصلي
@@ -979,33 +998,33 @@ impl OrganizerEngine {
     /// يعيد فقط ما نُقل فعلاً ولا يكتب فوق أي ملف.
     pub fn undo_from_journal(source_path: &Path, progress: &AtomicUsize) -> Option<RunResult> {
         let mut journal = Journal::load(source_path)?;
-        // المسارات في البيان مطلقة؛ تُعاد بناؤها نسبةً إلى المجلد الحالي فيعمل التراجع بعد نقل المجلد
-        let journaled_source = journal.source.clone();
-        let rebase = |p: &PathBuf| -> PathBuf {
-            p.strip_prefix(&journaled_source).map(|r| source_path.join(r)).unwrap_or_else(|_| p.clone())
-        };
-        // الحفظ التالي يكتب البيان في مكان المجلد الجديد لا القديم
-        journal.source = source_path.to_path_buf();
+        // المسارات في البيان مطلقة؛ تُعاد بناؤها نسبةً إلى المجلد الحالي فيعمل التراجع بعد نقله
+        let source = journal.source.clone();
+        let at = |p: &Path| rebased(source_path, &source, p);
         let moves: Vec<PlannedMove> = journal
             .entries
             .iter()
             // نقل وقع بعد آخر حفظ للبيان (قبل `journal.save`) لا يزال done=false
-            .filter(|e| e.done || (rebase(&e.to).exists() && !rebase(&e.from).exists()))
-            .map(|e| PlannedMove { from: rebase(&e.from), to: rebase(&e.to) })
+            .filter(|e| e.done || (at(&e.to).exists() && !at(&e.from).exists()))
+            .map(|e| PlannedMove { from: at(&e.from), to: at(&e.to) })
             .collect();
         if moves.is_empty() {
             return Some(RunResult::default());
         }
-        let created_dirs: Vec<PathBuf> = journal.created_dirs.iter().map(&rebase).collect();
-        let result = Self::undo(&moves, source_path, &created_dirs, progress);
+        let created_dirs: Vec<PathBuf> = journal.created_dirs.iter().map(|d| at(d)).collect();
+        let mut result = Self::undo(&moves, source_path, &created_dirs, progress);
         // ما أُرجع يُعلَّم غير منقول، وما فشل يبقى معلَّمًا لإعادة المحاولة
         let failed: HashSet<PathBuf> = result.failed.iter().map(|m| m.to.clone()).collect();
         for entry in journal.entries.iter_mut().filter(|e| e.done) {
-            if !failed.contains(&rebase(&entry.to)) {
+            if !failed.contains(&at(&entry.to)) {
                 entry.done = false;
             }
         }
-        let _ = journal.save();
+        // الحفظ التالي يكتب البيان في مكان المجلد الجديد لا القديم
+        journal.source = source_path.to_path_buf();
+        if let Err(e) = journal.save() {
+            result.warning = Some(e);
+        }
         Some(result)
     }
 
@@ -2084,6 +2103,53 @@ trailer
         assert_eq!(tree(&moved), before);
         assert!(!root.exists(), "البيان أُعيد إنشاء المسار القديم");
         fs::remove_dir_all(&moved).unwrap();
+    }
+
+    #[test]
+    fn a_failed_journal_write_is_reported_in_the_result() {
+        let root = temp_tree("journal_unwritable", &["a.txt", "b/2.pdf"]);
+        // `history.json` مجلد: الكتابة المؤقتة تنجح والاستبدال يفشل، فيفشل حفظ البيان
+        fs::create_dir_all(root.join(JOURNAL_DIR).join("history.json")).unwrap();
+        let plan = OrganizerEngine::plan(&root, &rebuild()).unwrap();
+
+        let result = OrganizerEngine::execute(&plan, &AtomicUsize::new(0));
+
+        assert!(result.warning.is_some(), "فشل كتابة البيان لم يُبلَّغ");
+        assert_eq!(result.done.len(), plan.moves.len(), "النقل نفسه لا يجب أن يتوقف");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn undo_restores_the_tree_from_every_interruption_point() {
+        let names = ["1.pdf", "2.pdf", "a/3.pdf", "clip.mp4", "sea.jpg"];
+        let probe = temp_tree("fault_probe", &names);
+        let (plan, _) = organize(&probe, &rebuild());
+        let moves = plan.moves.clone();
+        fs::remove_dir_all(&probe).unwrap();
+        assert!(!moves.is_empty());
+
+        // كل نقطة انقطاع ممكنة: k نقلًا محفوظًا في البيان، ثم نقل k+1 وقع قبل حفظه
+        for k in 0..=moves.len() {
+            let root = temp_tree(&format!("fault_{k}"), &names);
+            let before = tree(&root);
+            let at = |p: &PathBuf| root.join(p.strip_prefix(&probe).unwrap());
+            let mut journal = Journal { source: root.clone(), created_dirs: vec![], entries: vec![] };
+            for (i, m) in moves.iter().enumerate() {
+                let (from, to) = (at(&m.from), at(&m.to));
+                if i <= k && i < moves.len() {
+                    fs::create_dir_all(to.parent().unwrap()).unwrap();
+                    fs::rename(&from, &to).unwrap();
+                }
+                journal.entries.push(JournalEntry { from, to, done: i < k });
+            }
+            journal.save().unwrap();
+
+            let undone = OrganizerEngine::undo_from_journal(&root, &AtomicUsize::new(0)).unwrap();
+
+            assert!(undone.failed.is_empty(), "k={k}: {:?}", undone.failed);
+            assert_eq!(tree(&root), before, "k={k}: الشجرة لم تعد كما كانت");
+            fs::remove_dir_all(&root).unwrap();
+        }
     }
 
     #[test]
