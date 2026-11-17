@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/alimwork85-web/Array/releases/latest/download/Array-2.1.2.exe"><b>⬇ تنزيل Array 2.1.2 لويندوز</b></a>
+  <a href="https://github.com/alimwork85-web/Array/releases/latest/download/Array-2.1.3.exe"><b>⬇ تنزيل Array 2.1.3 لويندوز</b></a>
   &nbsp;·&nbsp;
   <a href="https://github.com/alimwork85-web/Array/releases">كل الإصدارات</a>
   &nbsp;·&nbsp;
@@ -62,7 +62,7 @@
 ## التنزيل والتشغيل
 
 - **المتطلبات:** ويندوز 10 أو 11 (64 بت). لا يحتاج إنترنت ولا تثبيت أي شيء آخر.
-- **التشغيل:** نزّل [`Array-2.1.2.exe`](https://github.com/alimwork85-web/Array/releases/latest/download/Array-2.1.2.exe) (حوالي 12 MB) وشغّله مباشرة. يمكنك وضعه في أي مجلد وعمل اختصار له.
+- **التشغيل:** نزّل [`Array-2.1.3.exe`](https://github.com/alimwork85-web/Array/releases/latest/download/Array-2.1.3.exe) (حوالي 12 MB) وشغّله مباشرة. يمكنك وضعه في أي مجلد وعمل اختصار له.
 - **تحذير ويندوز (SmartScreen):** قد يظهر عند أول تشغيل لأن الملف غير موقّع رقمياً. اختر «مزيد من المعلومات» ثم «تشغيل على أي حال».
 - **الإعدادات وسجل التراجع** تُحفظ في `%APPDATA%\Array`. لإزالة البرنامج احذف ملف `exe` وهذا المجلد.
 
@@ -128,7 +128,7 @@ cargo test
 </p>
 
 <p align="center">
-  <a href="https://github.com/alimwork85-web/Array/releases/latest/download/Array-2.1.2.exe"><b>⬇ Download Array 2.1.2 for Windows</b></a>
+  <a href="https://github.com/alimwork85-web/Array/releases/latest/download/Array-2.1.3.exe"><b>⬇ Download Array 2.1.3 for Windows</b></a>
   &nbsp;·&nbsp;
   <a href="https://github.com/alimwork85-web/Array/releases">All releases</a>
 </p>
@@ -167,7 +167,7 @@ Downloads, photos copied from your phone, audio collections… they pile up with
 ### Download & run
 
 - **Requirements:** Windows 10 or 11 (64-bit). No internet and nothing else to install.
-- **Run:** download [`Array-2.1.2.exe`](https://github.com/alimwork85-web/Array/releases/latest/download/Array-2.1.2.exe) (about 12 MB) and run it directly — it is portable; put it in any folder and make a shortcut.
+- **Run:** download [`Array-2.1.3.exe`](https://github.com/alimwork85-web/Array/releases/latest/download/Array-2.1.3.exe) (about 12 MB) and run it directly — it is portable; put it in any folder and make a shortcut.
 - **Windows SmartScreen** may warn on first run because the file is not code-signed. Choose *More info* → *Run anyway*.
 - **Settings and the undo record** are stored in `%APPDATA%\Array`. To remove the app, delete the `.exe` and that folder.
 

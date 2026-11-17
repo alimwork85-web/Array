@@ -2,11 +2,11 @@
 
 > اقرأ هذا الملف أولًا، ثم `AGENTS.md`. المراحل كلها منجزة وقائمة إصلاحات المراجعة نُفِّذت؛ المتبقي قائمة مؤجَّلة في آخر الملف.
 
-## أين نحن (بعد إصدار 2.1.2)
+## أين نحن (بعد إصدار 2.1.3)
 - المشروع: `C:\Users\suailali\Desktop\المستودع\Array` (Rust + egui، الكود في `array/`).
 - الفرع: **`main`**، الشجرة نظيفة، مرفوع إلى `github.com/alimwork85-web/Array` (مستودع **عام**).
-- الإصدار الحالي **2.1.2** منشور: Release `v2.1.2` ومعه `Array-2.1.2.exe` مبنية على GitHub Actions.
-- الـEXE المحلي: `C:\Users\suailali\Desktop\المستودع\Array-2.1.2.exe` + اختصاران (`Desktop\Array.lnk`، `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Array.lnk`) يشيران إليه.
+- الإصدار الحالي **2.1.3** منشور: Release `v2.1.3` ومعه `Array-2.1.3.exe` مبنية على GitHub Actions.
+- الـEXE المحلي: `C:\Users\suailali\Desktop\المستودع\Array-2.1.3.exe` + اختصاران (`Desktop\Array.lnk`، `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Array.lnk`) يشيران إليه.
 - البوابة الخضراء: `cargo test` = **110 ناجح / 0 فاشل / 1 متجاهَل**، `cargo build --release` = **0 تحذير**، EXE ≈ 12.20 MB.
 - المراحل المنجزة: 0، 1-أ، 2، 1، 3، 5، 4 — كل واحدة بتقريرها في `REPORTS/phase-*.md`. فروع `plan/phase-*` حُذفت بعد الدمج.
 
@@ -25,6 +25,8 @@
 7. مجلد التراجع صار **المجلد المختار الحالي** لا المسار المخزَّن (`undo_state`/`undo_log_for`)، وينطبق على سجل AppData (`UndoLog::rebased`) وبيان المجلد معًا.
 8. فشل كتابة البيان لم يبقَ مُهمَلًا: `RunResult.warning` يظهر في نتيجة التنظيم أو التراجع.
 9. اختبار حقن فشل: `undo_restores_the_tree_from_every_interruption_point` — لكل نقطة انقطاع (بعد `k` نقلًا، وبين النقل وحفظ البيان) يُعاد بناء مجلد نقي ويُختبَر التراجع. مُتحقَّق أنه يفشل فعلًا إذا أُزيل شرط البند 3.
+
+**2.1.3 — منع الاستبدال في مسار النسخ:** `copy_new` (create_new + io::copy) بدل `fs::copy`، فلا يُمحى ملف ظهر في الهدف بين فحص `exists` والنقل.
 
 ## مؤجَّل بوعي (لا تفتحه بلا طلب من علي)
 - **سباق `dst.exists()` ثم `fs::rename`** في `organizer::move_file`: **نصفه أُغلق** — مسار النسخ الاحتياطي صار `copy_new` (create_new) فلا يستبدل ملفًا ظهر في الأثناء (`copying_never_overwrites_a_file_that_appeared_at_the_target`). المتبقي: `fs::rename` نفسه ما زال يستبدل في سباق أضيق جدًا، ويحتاج `MoveFileExW` بلا `REPLACE_EXISTING` عبر FFI — مؤجَّل بلا طلب من علي.
