@@ -234,7 +234,11 @@ impl Journal {
             fs::create_dir_all(dir).map_err(|e| format!("{}: {}", tr("Could not write the record", "تعذّر كتابة البيان"), e))?;
         }
         let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        fs::write(&path, text).map_err(|e| format!("{}: {}", tr("Could not write the record", "تعذّر كتابة البيان"), e))
+        // في ملف مؤقت ثم استبدال: انقطاع أثناء الكتابة لا يترك بيانًا نصف مكتوب
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, text)
+            .and_then(|_| fs::rename(&tmp, &path))
+            .map_err(|e| format!("{}: {}", tr("Could not write the record", "تعذّر كتابة البيان"), e))
     }
 
     pub fn load(source: &Path) -> Option<Self> {
@@ -2022,6 +2026,16 @@ trailer
         fs::write(root.join("b.txt"), b"identical1").unwrap();
         let (plan, _) = organize(&root, &rebuild());
         assert_eq!(plan.duplicates, 1);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_journal_is_saved_through_a_temp_file() {
+        let root = temp_tree("journal_atomic", &["a.txt"]);
+        Journal::new(&root, &[], &[]).save().unwrap();
+        assert!(Journal::path(&root).is_file());
+        assert!(!root.join(JOURNAL_DIR).join("history.json.tmp").exists(), "الملف المؤقت بقي بعد الحفظ");
+        assert!(Journal::load(&root).is_some(), "البيان المحفوظ لا يُقرأ");
         fs::remove_dir_all(&root).unwrap();
     }
 
