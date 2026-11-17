@@ -125,6 +125,62 @@ pub struct PlannedMove {
     pub to: PathBuf,
 }
 
+/// بيان المجلد: سجل كتابة مسبقة داخل المجلد المرتَّب نفسه (`.array/history.json`).
+/// يُكتب قبل تنفيذ أي عملية ويُعلَّم بعد نجاحها، فيبقى التراجع ممكنًا بعد حذف سجل AppData.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Journal {
+    pub source: PathBuf,
+    /// مجلدات أنشأها التنظيم (تُحذف عند التراجع إذا فرغت)
+    #[serde(default)]
+    pub created_dirs: Vec<PathBuf>,
+    pub entries: Vec<JournalEntry>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct JournalEntry {
+    pub from: PathBuf,
+    pub to: PathBuf,
+    /// true = نُقلت العملية فعلاً
+    #[serde(default)]
+    pub done: bool,
+}
+
+/// مجلد بيانات Array داخل المجلد المرتَّب
+pub const JOURNAL_DIR: &str = ".array";
+
+impl Journal {
+    pub fn path(source: &Path) -> PathBuf {
+        source.join(JOURNAL_DIR).join("history.json")
+    }
+
+    pub fn exists(source: &Path) -> bool {
+        Self::path(source).is_file()
+    }
+
+    pub fn new(source: &Path, moves: &[PlannedMove], created_dirs: &[PathBuf]) -> Self {
+        Self {
+            source: source.to_path_buf(),
+            created_dirs: created_dirs.to_vec(),
+            entries: moves.iter().map(|m| JournalEntry { from: m.from.clone(), to: m.to.clone(), done: false }).collect(),
+        }
+    }
+
+    /// يُعاد كتابة الملف كاملاً بعد كل عملية (بسيط ومقبول لحجم مجلد عادي؛
+    /// لو صار عدد الملفات بالآلاف فالحل الإلحاقي سطر بسطر)
+    pub fn save(&self) -> Result<(), String> {
+        let path = Self::path(&self.source);
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).map_err(|e| format!("{}: {}", tr("Could not write the record", "تعذّر كتابة البيان"), e))?;
+        }
+        let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+        fs::write(&path, text).map_err(|e| format!("{}: {}", tr("Could not write the record", "تعذّر كتابة البيان"), e))
+    }
+
+    pub fn load(source: &Path) -> Option<Self> {
+        serde_json::from_str(&fs::read_to_string(Self::path(source)).ok()?).ok()
+    }
+}
+
 /// خطة التنظيم الكاملة قبل نقل أي ملف (تُعرض للمعاينة ثم تُنفَّذ)
 pub struct Plan {
     pub source: PathBuf,
@@ -698,6 +754,9 @@ impl OrganizerEngine {
 
     pub fn execute(plan: &Plan, progress: &AtomicUsize) -> RunResult {
         let mut result = RunResult::default();
+        // البيان يُكتب قبل أول عملية: لو انقطع التنفيذ يُعرف ما تحرّك وما لم يتحرك
+        let mut journal = Journal::new(&plan.source, &plan.moves, &plan.new_dirs);
+        let _ = journal.save();
         let lower = |p: &Path| p.to_string_lossy().to_lowercase();
         // أهداف تطابق مصادر أخرى تعني تبديلاً (photo.jpg ↔ photo (1).jpg):
         // تُنقل هذه الملفات أولاً إلى اسم مؤقت ثم إلى هدفها، فلا يتبادل ملفان اسميهما.
@@ -716,6 +775,10 @@ impl OrganizerEngine {
         for (m, src) in staged {
             let ok = m.to.parent().is_some_and(|dir| fs::create_dir_all(dir).is_ok()) && Self::move_file(&src, &m.to).is_ok();
             if ok {
+                if let Some(entry) = journal.entries.iter_mut().find(|e| e.from == m.from && e.to == m.to) {
+                    entry.done = true;
+                }
+                let _ = journal.save();
                 result.done.push(m.clone());
             } else {
                 // فشل: أعِد الملف من الاسم المؤقت إلى مكانه الأصلي
@@ -752,6 +815,36 @@ impl OrganizerEngine {
         }
         Self::remove_emptied_dirs(result.done.iter().map(|m| &m.to), source_path, |d| created_dirs.iter().any(|c| c == d));
         result
+    }
+
+    /// هل يوجد في المجلد بيان تنظيم سابق؟
+    pub fn has_journal(source_path: &Path) -> bool {
+        Journal::exists(source_path)
+    }
+
+    /// تراجع من البيان وحده: يعمل بعد حذف سجل AppData أو إعادة تثبيت البرنامج.
+    /// يعيد فقط ما نُقل فعلاً ولا يكتب فوق أي ملف.
+    pub fn undo_from_journal(source_path: &Path, progress: &AtomicUsize) -> Option<RunResult> {
+        let mut journal = Journal::load(source_path)?;
+        let moves: Vec<PlannedMove> = journal
+            .entries
+            .iter()
+            .filter(|e| e.done)
+            .map(|e| PlannedMove { from: e.from.clone(), to: e.to.clone() })
+            .collect();
+        if moves.is_empty() {
+            return Some(RunResult::default());
+        }
+        let result = Self::undo(&moves, source_path, &journal.created_dirs, progress);
+        // ما أُرجع يُعلَّم غير منقول، وما فشل يبقى معلَّمًا لإعادة المحاولة
+        let failed: HashSet<&PathBuf> = result.failed.iter().map(|m| &m.to).collect();
+        for entry in journal.entries.iter_mut().filter(|e| e.done) {
+            if !failed.contains(&entry.to) {
+                entry.done = false;
+            }
+        }
+        let _ = journal.save();
+        Some(result)
     }
 
     /// يرجع (الفنان، العنوان للتجميع، عنوان الوسوم المنظَّف إن كان صالحاً اسماً للملف)
@@ -1036,6 +1129,7 @@ trailer
     }
 
     /// كل الملفات تحت المجلد (مسارات نسبية بشرطة /) مرتبة، للمقارنة قبل وبعد
+    /// شجرة الملفات للاختبارات، بلا مجلد البيان `.array`
     fn tree(root: &Path) -> Vec<String> {
         let mut files: Vec<String> = WalkDir::new(root)
             .into_iter()
@@ -1043,6 +1137,7 @@ trailer
             .filter(|e| e.file_type().is_file())
             .map(|e| e.path().strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"))
             .collect();
+        files.retain(|f| !f.starts_with(".array/"));
         files.sort();
         files
     }
@@ -1578,6 +1673,44 @@ trailer
         // المجلدات التي أنشأها التنظيم حُذفت، والأصلية باقية حتى الفارغة منها
         assert!(!root.join("Videos").exists() && !root.join("Documents").exists() && !root.join("Music").exists());
         assert!(root.join("صور").is_dir() && root.join("keep_me").is_dir());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_journal_restores_a_run_that_stopped_halfway() {
+        let root = temp_tree("journal_partial", &["a/1.pdf", "a/2.pdf", "a/3.pdf"]);
+        let before = tree(&root);
+        let plan = OrganizerEngine::plan(&root, &rebuild()).unwrap();
+        // البيان يُكتب قبل أي عملية، ثم نُفِّذت الأولى فقط كما لو انقطع البرنامج
+        let mut journal = Journal::new(&plan.source, &plan.moves, &plan.new_dirs);
+        journal.save().unwrap();
+        let first = &plan.moves[0];
+        fs::create_dir_all(first.to.parent().unwrap()).unwrap();
+        fs::rename(&first.from, &first.to).unwrap();
+        journal.entries[0].done = true;
+        journal.save().unwrap();
+
+        let undone = OrganizerEngine::undo_from_journal(&root, &AtomicUsize::new(0)).unwrap();
+
+        assert_eq!(undone.done.len(), 1);
+        assert!(undone.failed.is_empty());
+        assert_eq!(tree(&root), before);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn undo_reads_the_folder_journal_without_any_appdata_log() {
+        let root = temp_tree("journal_full", &["1.pdf", "2.pdf", "clip.mp4", "sea.jpg"]);
+        let before = tree(&root);
+        let (plan, _) = organize(&root, &rebuild());
+        assert!(Journal::exists(&root), "البيان لم يُكتب داخل المجلد");
+
+        // لا سجل AppData هنا إطلاقاً: التراجع من البيان وحده
+        let undone = OrganizerEngine::undo_from_journal(&root, &AtomicUsize::new(0)).unwrap();
+
+        assert_eq!(undone.done.len(), plan.moves.len());
+        assert!(undone.failed.is_empty());
+        assert_eq!(tree(&root), before);
         fs::remove_dir_all(&root).unwrap();
     }
 

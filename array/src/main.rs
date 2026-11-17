@@ -17,7 +17,8 @@ use eframe::egui::{self, RichText};
 
 use i18n::{ar, count, tr, Noun};
 use icons::Icon;
-use organizer::{Options, OrganizerEngine, Plan};
+use organizer::{Journal, Options, OrganizerEngine, Plan};
+use safety::SafetyChecker;
 use rfd::FileDialog;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -249,9 +250,31 @@ impl ArrayApp {
                 (0, 0, None)
             }
         };
-        self.undo_entries = entries;
-        self.undo_count = Some(movable).filter(|&n| n > 0);
-        self.undo_source = source;
+        if entries > 0 {
+            self.undo_entries = entries;
+            self.undo_count = Some(movable).filter(|&n| n > 0);
+            self.undo_source = source;
+            return;
+        }
+        // لا سجل AppData: يُقرأ البيان من المجلد المختار نفسه (بعد حذف السجل أو إعادة التثبيت)
+        let from_journal = self
+            .selected_path
+            .as_ref()
+            .filter(|p| OrganizerEngine::has_journal(p))
+            .and_then(|p| Journal::load(p));
+        match from_journal {
+            Some(journal) => {
+                let moved = journal.entries.iter().filter(|e| e.done && e.to.exists()).count();
+                self.undo_entries = moved;
+                self.undo_count = Some(moved).filter(|&n| n > 0);
+                self.undo_source = Some(journal.source);
+            }
+            None => {
+                self.undo_entries = 0;
+                self.undo_count = None;
+                self.undo_source = None;
+            }
+        }
     }
 
     fn busy(&self) -> bool {
@@ -332,6 +355,8 @@ impl ArrayApp {
 
     fn select_folder(&mut self, path: PathBuf) {
         self.selected_path = Some(path);
+        // مجلد فيه بيان تنظيم سابق: زر التراجع متاح حتى لو حُذف سجل AppData
+        self.refresh_undo();
         self.outcome = None;
         self.status_message = tr("Ready. Press Preview to see where each file will go.", "جاهز. اضغط معاينة لترى أين سيذهب كل ملف.").to_string();
     }
@@ -392,25 +417,37 @@ impl ArrayApp {
         let progress = Arc::new(AtomicUsize::new(0));
         let total = self.undo_entries;
         let folder = self.undo_source.clone().unwrap_or_default();
+        let job_folder = folder.clone();
         let storage = self.storage.clone();
         let counter = progress.clone();
         let rx = spawn_job(ctx, move || {
-            let Some(log) = storage.load_undo()? else {
-                return Err(tr("There is nothing to undo.", "لا يوجد ما يمكن التراجع عنه.").to_string());
-            };
-            let result = OrganizerEngine::undo(&log.moves, &log.source, &log.created_dirs, &counter);
-            // الملفات التي لم تُرجع تبقى في السجل لإعادة المحاولة
-            if result.failed.is_empty() {
-                storage.clear_undo()?;
+            // البيان داخل المجلد أولاً: يعمل حتى لو حُذف سجل AppData أو أُعيد تثبيت البرنامج
+            let result = if OrganizerEngine::has_journal(&folder) {
+                let result = OrganizerEngine::undo_from_journal(&folder, &counter)
+                    .ok_or_else(|| tr("The record in this folder is damaged.", "البيان في هذا المجلد تالف.").to_string())?;
+                if result.failed.is_empty() {
+                    storage.clear_undo()?;
+                }
+                result
             } else {
-                storage.save_undo(&UndoLog { source: log.source.clone(), moves: result.failed.clone(), created_dirs: log.created_dirs.clone() })?;
-            }
+                let Some(log) = storage.load_undo()? else {
+                    return Err(tr("There is nothing to undo.", "لا يوجد ما يمكن التراجع عنه.").to_string());
+                };
+                let result = OrganizerEngine::undo(&log.moves, &log.source, &log.created_dirs, &counter);
+                // الملفات التي لم تُرجع تبقى في السجل لإعادة المحاولة
+                if result.failed.is_empty() {
+                    storage.clear_undo()?;
+                } else {
+                    storage.save_undo(&UndoLog { source: log.source.clone(), moves: result.failed.clone(), created_dirs: log.created_dirs.clone() })?;
+                }
+                result
+            };
 
             let done = count(result.done.len(), Noun::File);
             let mut msg = if ar() {
-                format!("↩ أُعيد {} إلى أماكنها الأصلية في {}", done, folder_name(&log.source))
+                format!("↩ أُعيد {} إلى أماكنها الأصلية في {}", done, folder_name(&folder))
             } else {
-                format!("↩ Restored {} to their original places in {}", done, folder_name(&log.source))
+                format!("↩ Restored {} to their original places in {}", done, folder_name(&folder))
             };
             if !result.failed.is_empty() {
                 let failed = count(result.failed.len(), Noun::File);
@@ -422,7 +459,7 @@ impl ArrayApp {
             }
             Ok(msg)
         });
-        self.job = Some(Job::Moving { restoring: true, rx, progress, total, folder });
+        self.job = Some(Job::Moving { restoring: true, rx, progress, total, folder: job_folder });
         self.page = Page::Organize;
         self.status_message = format!("⏳ {}", tr("Restoring files… please wait", "جارٍ إعادة الملفات… لحظات"));
     }
@@ -784,6 +821,23 @@ impl ArrayApp {
             theme::stat(ui, width, Icon::Shield, plan.skipped.len(), tr("protected folders", "مجلدات محمية"), p.success);
         });
         ui.add_space(12.0);
+
+        // مجلد سحابي: النقل فيه يعني رفعاً وتنزيلاً
+        if let Some(provider) = SafetyChecker::cloud_provider(&plan.source) {
+            let warning = if ar() {
+                format!(
+                    "⚠ هذا المجلد داخل {provider}: النقل فيه يعني رفعاً وتنزيلاً. العمليات المتوقعة: {}.",
+                    count(plan.moves.len(), Noun::File)
+                )
+            } else {
+                format!(
+                    "⚠ This folder is inside {provider}: moving files there means uploading and downloading. Expected operations: {}.",
+                    count(plan.moves.len(), Noun::File)
+                )
+            };
+            ui.label(theme::muted(rtl::for_display(&warning)));
+            ui.add_space(6.0);
+        }
 
         // إلى أين تذهب الملفات
         let wrap_layout = if ar() {

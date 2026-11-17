@@ -169,6 +169,29 @@ impl SafetyChecker {
         saw_installer
     }
 
+    /// مزوّد السحابة إن كان المجلد داخل مجلد مزامنة: النقل فيه يعني رفعًا وتنزيلًا
+    pub fn cloud_provider(path: &Path) -> Option<&'static str> {
+        for var in ["OneDrive", "OneDriveConsumer", "OneDriveCommercial"] {
+            if let Some(dir) = std::env::var_os(var) {
+                if !dir.is_empty() && path.starts_with(&dir) {
+                    return Some("OneDrive");
+                }
+            }
+        }
+        let lower = path.to_string_lossy().to_lowercase();
+        if lower.contains("onedrive") {
+            Some("OneDrive")
+        } else if lower.contains("google drive") || lower.contains("googledrive") || lower.contains("my drive") {
+            Some("Google Drive")
+        } else if lower.contains("dropbox") {
+            Some("Dropbox")
+        } else if lower.contains("icloud drive") {
+            Some("iCloud Drive")
+        } else {
+            None
+        }
+    }
+
     /// هل يجب تخطّي هذا المجلد الفرعي بالاسم (مخفي أو مجلد نظام/برامج)؟
     pub fn is_skipped_dir_name(name: &str) -> bool {
         let lower = name.to_lowercase();
@@ -269,6 +292,14 @@ mod tests {
         assert!(SafetyChecker::is_safe_root(Path::new("D:\\Music")));
         // كلمة windows داخل اسم مجلد عادي لا تمنعه
         assert!(SafetyChecker::is_safe_root(Path::new("C:\\Users\\me\\Downloads\\windows-wallpapers")));
+    }
+
+    #[test]
+    fn cloud_folders_are_recognized() {
+        assert_eq!(SafetyChecker::cloud_provider(Path::new("C:\\Users\\me\\OneDrive\\Pictures")), Some("OneDrive"));
+        assert_eq!(SafetyChecker::cloud_provider(Path::new("D:\\Google Drive\\Photos")), Some("Google Drive"));
+        assert_eq!(SafetyChecker::cloud_provider(Path::new("C:\\Users\\me\\Dropbox\\Camera Uploads")), Some("Dropbox"));
+        assert_eq!(SafetyChecker::cloud_provider(Path::new("C:\\Users\\me\\Downloads")), None);
     }
 
     #[test]
