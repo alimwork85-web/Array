@@ -435,12 +435,23 @@ impl OrganizerEngine {
         if fs::rename(src, dst).is_ok() {
             return Ok(());
         }
-        // النسخ ثم الحذف؛ عند أي فشل نحذف النسخة حتى لا يبقى ملف ناقص أو مكرر
-        let result = fs::copy(src, dst).and_then(|_| fs::remove_file(src));
-        if result.is_err() {
-            let _ = fs::remove_file(dst);
+        // النسخ ثم الحذف؛ `copy_new` يرفض هدفًا ظهر في الأثناء بدل أن يستبدله
+        if let Err(e) = Self::copy_new(src, dst) {
+            // لا يُحذف الهدف إن كان موجودًا من قبل (AlreadyExists) — ليس ملفنا
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                let _ = fs::remove_file(dst);
+            }
+            return Err(e);
         }
-        result
+        fs::remove_file(src)
+    }
+
+    /// نسخ بلا استبدال: `create_new` يفشل إن كان الهدف موجودًا، بخلاف `fs::copy` الذي يمحوه.
+    /// ponytail: النقل نفسه (`fs::rename`) ما زال يستبدل في سباق أضيق؛ يحتاج MoveFileExW لو أردت يقينًا.
+    fn copy_new(src: &Path, dst: &Path) -> std::io::Result<()> {
+        let mut input = fs::File::open(src)?;
+        let mut output = fs::OpenOptions::new().write(true).create_new(true).open(dst)?;
+        std::io::copy(&mut input, &mut output).and_then(|_| output.sync_all())
     }
 
     /// حذف المجلدات التي فرغت، صعوداً حتى المجلد المختار (ولا يُحذف هو أبداً).
@@ -2103,6 +2114,24 @@ trailer
         assert_eq!(tree(&moved), before);
         assert!(!root.exists(), "البيان أُعيد إنشاء المسار القديم");
         fs::remove_dir_all(&moved).unwrap();
+    }
+
+    #[test]
+    fn copying_never_overwrites_a_file_that_appeared_at_the_target() {
+        let root = temp_tree("copy_new", &["a.txt", "b/other.txt"]);
+        fs::write(root.join("a.txt"), b"original").unwrap();
+        let dst = root.join("b/a.txt");
+        fs::write(&dst, b"newcomer").unwrap();
+
+        let err = OrganizerEngine::copy_new(&root.join("a.txt"), &dst).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&dst).unwrap(), b"newcomer", "الملف الموجود مُحي");
+        assert!(root.join("a.txt").exists(), "المصدر اختفى");
+        // والنسخ إلى هدف حرّ يعمل
+        OrganizerEngine::copy_new(&root.join("a.txt"), &root.join("b/free.txt")).unwrap();
+        assert_eq!(fs::read(root.join("b/free.txt")).unwrap(), b"original");
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
