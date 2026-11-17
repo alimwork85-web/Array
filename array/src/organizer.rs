@@ -29,6 +29,23 @@ static RE_INNER_EXT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\.(mp3|m4a|aac|wav|ogg|flac|wma|opus|mp4|mkv|avi|mov|jpe?g|png|pdf|docx?)\s*$").unwrap());
 static RE_EPISODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(الحلقة|حلقة|part|ep|episode)\s*\d+").unwrap());
 
+/// مجلد كل فئة داخل المجلد المختار: المفتاح الداخلي ثم الاسم العربي الافتراضي
+const CATEGORY_FOLDERS: [(&str, &str); 7] = [
+    ("Music", "صوتيات"),
+    ("Pictures", "صور"),
+    ("Videos", "فيديو"),
+    ("Documents", "مستندات"),
+    ("Archives", "مضغوطات"),
+    ("Installers", "مثبّتات"),
+    ("Recordings", "تسجيلات"),
+];
+
+/// تُقسم السنة إلى مجلدات أشهر إذا تجاوز عدد ملفاتها هذا الحد (ثابت واحد، بلا خيار للمستخدم)
+const YEAR_SPLIT_LIMIT: usize = 500;
+
+/// ملفات ترافق ملفاً رئيسياً: الترجمة مع الفيديو، وبيانات التعديل مع الصورة
+const COMPANION_EXTENSIONS: [&str; 5] = ["srt", "ass", "vtt", "xmp", "aae"];
+
 /// كلمات تدل على صاحب المقطع في نهاية اسم الملف (مثل: "محاضرة - الشيخ فلان")
 pub const DEFAULT_SPEAKER_KEYWORDS: [&str; 4] = ["الشيخ", "دكتور", "فنان", "أدهم"];
 
@@ -131,12 +148,15 @@ pub struct RunResult {
     pub unchanged: usize,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FileType {
     Audio,
     Image,
     Video,
     Document,
     Archive,
+    /// مثبّت في جذر المجلد المختار فقط (.exe و.msi)
+    Installer,
     Other,
 }
 
@@ -170,6 +190,7 @@ impl OrganizerEngine {
                 FileType::Document
             }
             "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" => FileType::Archive,
+            "exe" | "msi" => FileType::Installer,
             // أي نوع آخر (برامج، اختصارات، إعدادات، قواعد بيانات، ملفات غير معروفة) لا يُلمس أبداً
             _ => FileType::Other,
         }
@@ -293,11 +314,13 @@ impl OrganizerEngine {
             "Pictures" => &["pictures", "photos", "photo", "images", "image", "صور", "الصور", "صورة", "الصورة"],
             "Videos" => &["videos", "video", "movies", "فيديو", "فيديوهات", "الفيديو", "مقاطع فيديو", "أفلام"],
             "Documents" => &["documents", "docs", "مستندات", "المستندات", "وثائق"],
+            "Installers" => &["installers", "setup", "مثبتات", "المثبتات", "مثبّتات"],
+            "Recordings" => &["recordings", "voice recordings", "تسجيلات", "التسجيلات", "تسجيل صوتي"],
             _ => &["archives", "compressed", "أرشيف", "مضغوطات", "ملفات مضغوطة"],
         }
     }
 
-    /// مجلد كل فئة داخل المجلد المختار: مجلد موجود يناسبها إن وُجد، وإلا مجلد جديد بالاسم الإنجليزي
+    /// مجلد كل فئة داخل المجلد المختار: مجلد موجود يناسبها إن وُجد، وإلا مجلد جديد بالاسم العربي
     fn category_dirs(source_path: &Path) -> HashMap<&'static str, PathBuf> {
         let mut existing: Vec<(String, PathBuf)> = fs::read_dir(source_path)
             .map(|entries| {
@@ -316,7 +339,7 @@ impl OrganizerEngine {
         let root_key = Self::group_key(source_path.file_name().unwrap_or_default().to_string_lossy().trim());
 
         let mut dirs = HashMap::new();
-        for category in ["Music", "Pictures", "Videos", "Documents", "Archives"] {
+        for (category, default_name) in CATEGORY_FOLDERS {
             let synonyms: Vec<String> = Self::category_synonyms(category).iter().map(|s| Self::group_key(s)).collect();
             if synonyms.contains(&root_key) {
                 dirs.insert(category, source_path.to_path_buf());
@@ -325,9 +348,9 @@ impl OrganizerEngine {
             // الاسم الإنجليزي أولاً ثم بقية المرادفات بترتيبها
             let found = synonyms.iter().find_map(|syn| existing.iter().find(|(key, _)| key == syn).map(|(_, p)| p.clone()));
             let dir = found.unwrap_or_else(|| {
-                let default = source_path.join(category);
+                let default = source_path.join(default_name);
                 // اسم الفئة محجوز لملف أو لمجلد برنامج: نستخدم اسماً آخر بدل الكتابة داخله
-                if default.exists() { source_path.join(format!("{} (Array)", category)) } else { default }
+                if default.exists() { source_path.join(format!("{default_name} (Array)")) } else { default }
             });
             dirs.insert(category, dir);
         }
@@ -363,10 +386,16 @@ impl OrganizerEngine {
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
             .filter(|e| {
-                e.path()
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| !matches!(Self::get_file_type(ext), FileType::Other))
+                let Some(ext) = e.path().extension().and_then(|x| x.to_str()).map(|x| x.to_lowercase()) else {
+                    return false;
+                };
+                match Self::get_file_type(&ext) {
+                    // مرافق لملف رئيسي (ترجمة، بيانات تعديل) يُجمع ليُنقل معه
+                    FileType::Other => COMPANION_EXTENSIONS.contains(&ext.as_str()),
+                    // المثبّتات تُنقل من جذر المجلد المختار فقط، لا من المجلدات الفرعية
+                    FileType::Installer => e.depth() == 1,
+                    _ => true,
+                }
             })
             .map(|e| e.into_path())
             .collect();
@@ -384,32 +413,40 @@ impl OrganizerEngine {
         Self::check_source(source_path)?;
         let keywords: Vec<String> = options.speaker_keywords.iter().map(|k| Self::group_key(k.trim())).collect();
 
-        let mut raw_files: Vec<RawFileInfo> = Vec::new();
-        let (files, skipped) = Self::collect_files(source_path);
+        let (all_files, skipped) = Self::collect_files(source_path);
+        // المرافق (ترجمة/بيانات تعديل/فيديو صورة حية) يُنقل مع رئيسيه لا وحده
+        let (files, companions) = Self::split_packages(&all_files);
         let category_dirs = Self::category_dirs(source_path);
         let music_dir = &category_dirs["Music"];
+        let mut raw_files: Vec<RawFileInfo> = Vec::new();
         let mut tracks: Vec<Track> = Vec::new();
 
         for path in files {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_string();
             let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-
             let file_type = Self::get_file_type(&ext);
             let kind = Self::naming_kind(&file_type);
             let (category, clean_name, track, audio_tag_name) = match file_type {
                 FileType::Audio => {
                     let (artist, title, tag_title) = Self::extract_audio_info(&path);
-                    let (speaker, speaker_key) = Self::extract_group_key(&artist, &title, &keywords);
-                    let speaker = (speaker_key != "single tracks").then_some(speaker);
-                    let track = grouping::read_track(&path, source_path, music_dir, &artist, &title, speaker.as_deref(), &options.ai_markers);
+                    let clean = Self::best_name(&stem, tag_title.clone());
                     let tag_name = tag_title.clone().map(|t| Self::tag_name(&artist, &t));
-                    ("Music", Self::best_name(&stem, tag_title), Some(track), tag_name)
+                    // تسجيل صوتي اسمه لا يدل عليه: مجلد التسجيلات لا الموسيقى
+                    if naming::naming_group(&path, &clean, Kind::Audio) == Some(NamingGroup::Recording) {
+                        ("Recordings", clean, None, tag_name)
+                    } else {
+                        let (speaker, speaker_key) = Self::extract_group_key(&artist, &title, &keywords);
+                        let speaker = (speaker_key != "single tracks").then_some(speaker);
+                        let track = grouping::read_track(&path, source_path, music_dir, &artist, &title, speaker.as_deref(), &options.ai_markers);
+                        ("Music", clean, Some(track), tag_name)
+                    }
                 }
                 other => {
                     let category = match other {
                         FileType::Image => "Pictures",
                         FileType::Video => "Videos",
                         FileType::Document => "Documents",
+                        FileType::Installer => "Installers",
                         _ => "Archives",
                     };
                     (category, Self::clean_string(&stem), None, None)
@@ -454,12 +491,6 @@ impl OrganizerEngine {
         let assignments = grouping::assign(&tracks, &existing_music_dirs);
         let misc_dir = music_dir.join(grouping::misc_folder_name(&existing_music_dirs));
         let ai_dir = music_dir.join(grouping::ai_folder_name(&existing_music_dirs));
-        let target_dir = |f: &RawFileInfo| match f.track_index.map(|i| &assignments[i]) {
-            Some(Assignment::Folder(name)) => music_dir.join(name),
-            Some(Assignment::Ai) => ai_dir.clone(),
-            Some(Assignment::Misc) => misc_dir.clone(),
-            None => category_dirs[f.category.as_str()].clone(),
-        };
         // مجلدات المستخدم الموجودة لا تُلمس: ملفاتها تبقى كما هي بالاسم والمكان
         let kept = |path: &Path| -> bool {
             let Ok(relative) = path.strip_prefix(source_path) else { return false };
@@ -473,10 +504,58 @@ impl OrganizerEngine {
             raw_files.into_iter().partition(|f| !(options.keep_existing_folders && kept(&f.path)));
         let kept_in_folders = kept_files.len();
 
+        // سنة كل صورة/فيديو/تسجيل (لاختيار المجلد فقط)، ثم عدّها لكل سنة لتقسيم الزائد إلى أشهر
+        let folder_dates: Vec<Option<(i32, u32)>> = raw_files
+            .iter()
+            .map(|f| match f.category.as_str() {
+                "Pictures" | "Videos" | "Recordings" => naming::folder_date(&f.path, f.kind),
+                _ => None,
+            })
+            .collect();
+        let mut year_counts: HashMap<(String, i32), usize> = HashMap::new();
+        for (f, date) in raw_files.iter().zip(&folder_dates) {
+            if let Some((year, _)) = date {
+                *year_counts.entry((f.category.clone(), *year)).or_default() += 1;
+            }
+        }
+        // السنوات الزائدة على الحد تُقسم إلى أشهر
+        let split_years: HashSet<(String, i32)> = year_counts
+            .iter()
+            .filter(|(_, count)| **count > YEAR_SPLIT_LIMIT)
+            .map(|((category, year), _)| (category.clone(), *year))
+            .collect();
+        let existing_years: HashMap<&str, Vec<String>> = ["Pictures", "Videos", "Recordings"]
+            .into_iter()
+            .map(|category| {
+                let names = fs::read_dir(&category_dirs[category])
+                    .map(|entries| {
+                        entries
+                            .flatten()
+                            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                            .map(|e| e.file_name().to_string_lossy().to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                (category, names)
+            })
+            .collect();
+
         let targeted: Vec<(RawFileInfo, PathBuf)> = raw_files
             .into_iter()
-            .map(|mut f| {
-                let dir = target_dir(&f);
+            .zip(folder_dates)
+            .map(|(mut f, date)| {
+                let dir = match f.track_index.map(|i| &assignments[i]) {
+                    Some(Assignment::Folder(name)) => music_dir.join(name),
+                    Some(Assignment::Ai) => ai_dir.clone(),
+                    Some(Assignment::Misc) => misc_dir.clone(),
+                    None => match f.category.as_str() {
+                        "Pictures" | "Recordings" => Self::year_dir(&category_dirs[f.category.as_str()], &existing_years, &split_years, date, f.category.as_str()),
+                        "Videos" if options.videos_by_year => Self::year_dir(&category_dirs["Videos"], &existing_years, &split_years, date, "Videos"),
+                        // المستندات تُقسم فرعياً بنوعها
+                        "Documents" => category_dirs["Documents"].join(Self::document_folder(&f.extension)),
+                        other => category_dirs[other].clone(),
+                    },
+                };
                 if let Some(name) = Self::trusted_name(&f, options) {
                     f.new_stem = name;
                 }
@@ -484,8 +563,18 @@ impl OrganizerEngine {
             })
             .collect();
 
-        let targeted = Self::place_videos(targeted, &category_dirs["Videos"], options.videos_by_year);
-        let (moves, in_place) = Self::plan_moves(targeted);
+        let (mut moves, in_place, finals) = Self::plan_moves(targeted);
+        // المرافق يتبع رئيسيه: نفس المجلد ونفس الاسم الجديد
+        let mut reserved: HashSet<String> = moves.iter().map(|m| m.to.to_string_lossy().to_lowercase()).collect();
+        for (companion, master) in companions {
+            let Some(dest) = finals.get(&master) else { continue };
+            let raw_ext = companion.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+            let ext = if options.rename_files { raw_ext.to_lowercase() } else { raw_ext };
+            let target = Self::free_path(&dest.with_extension(ext), &mut reserved);
+            if target.to_string_lossy().to_lowercase() != companion.to_string_lossy().to_lowercase() {
+                moves.push(PlannedMove { from: companion, to: target });
+            }
+        }
 
         // المجلدات غير الموجودة التي سيُنشئها التنفيذ
         let mut new_dirs: Vec<PathBuf> = Vec::new();
@@ -511,43 +600,140 @@ impl OrganizerEngine {
         })
     }
 
-    /// الفيديو: مقطع "صورة حية" (بنفس اسم صورة في نفس المجلد) يتبع صورته بالمكان والاسم حتى يبقيا
-    /// زوجاً؛ وغيره يذهب إلى مجلد سنة تصويره إن عُرفت، وإلا يبقى في مجلد الفيديو نفسه
-    fn place_videos(mut targeted: Vec<(RawFileInfo, PathBuf)>, videos_dir: &Path, by_year: bool) -> Vec<(RawFileInfo, PathBuf)> {
-        let key = |path: &Path| -> Option<(PathBuf, String)> {
-            Some((path.parent()?.to_path_buf(), path.file_stem()?.to_string_lossy().to_lowercase()))
-        };
-        let photos: HashMap<(PathBuf, String), (PathBuf, String)> = targeted
-            .iter()
-            .filter(|(f, _)| f.category == "Pictures")
-            .filter_map(|(f, dir)| Some((key(&f.path)?, (dir.clone(), f.new_stem.clone()))))
-            .collect();
-        let existing_years: Vec<String> = fs::read_dir(videos_dir)
-            .map(|entries| entries.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).map(|e| e.file_name().to_string_lossy().to_string()).collect())
-            .unwrap_or_default();
+    /// مجلد السنة داخل الفئة: يُعاد استخدام مجلد سنة موجود، ويُقسَّم إلى أشهر
+    /// إذا تجاوزت السنة الحد الثابت (بلا خيار للمستخدم)
+    fn year_dir(
+        category_dir: &Path,
+        existing: &HashMap<&str, Vec<String>>,
+        split_years: &HashSet<(String, i32)>,
+        date: Option<(i32, u32)>,
+        category: &str,
+    ) -> PathBuf {
+        let Some((year, month)) = date else { return category_dir.to_path_buf() };
+        let names = existing.get(category).map(|v| v.as_slice()).unwrap_or(&[]);
+        let dir = category_dir.join(video::year_folder_name(year, names));
+        if split_years.contains(&(category.to_string(), year)) {
+            return dir.join(format!("{month:02}"));
+        }
+        dir
+    }
 
-        for (f, dir) in targeted.iter_mut().filter(|(f, _)| f.category == "Videos") {
-            if let Some((photo_dir, photo_stem)) = key(&f.path).and_then(|k| photos.get(&k)) {
-                *dir = photo_dir.clone();
-                f.new_stem = photo_stem.clone();
-            } else if by_year {
-                if let Some(year) = video::year(&f.path) {
-                    *dir = videos_dir.join(video::year_folder_name(year, &existing_years));
-                }
+    /// مجلد المستند بحسب نوعه
+    fn document_folder(ext: &str) -> &'static str {
+        match ext.to_lowercase().as_str() {
+            "pdf" => "PDF",
+            "doc" | "docx" | "rtf" | "odt" => "Word",
+            "xls" | "xlsx" | "ods" => "Excel",
+            "ppt" | "pptx" | "odp" => "عروض",
+            "epub" | "mobi" | "azw3" => "كتب إلكترونية",
+            _ => "نصوص",
+        }
+    }
+
+    /// فصل الملفات الرئيسية عن مرافقاتها: الترجمة مع الفيديو، وبيانات التعديل مع الصورة،
+    /// وفيديو الصورة الحية (.mov) مع صورة heic. المرافق بلا رئيسي يبقى مكانه ولا يُجمع.
+    fn split_packages(files: &[PathBuf]) -> (Vec<PathBuf>, Vec<(PathBuf, PathBuf)>) {
+        let key = |p: &Path| -> Option<(PathBuf, String)> {
+            Some((p.parent()?.to_path_buf(), p.file_stem()?.to_string_lossy().to_lowercase()))
+        };
+        let ext = |p: &Path| p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let mut by_key: HashMap<(PathBuf, String), Vec<&PathBuf>> = HashMap::new();
+        for path in files {
+            if let Some(k) = key(path) {
+                by_key.entry(k).or_default().push(path);
             }
         }
-        targeted
+
+        let mut masters = Vec::new();
+        let mut companions = Vec::new();
+        for path in files {
+            let e = ext(path);
+            let siblings = key(path).and_then(|k| by_key.get(&k).cloned()).unwrap_or_default();
+            let find = |wanted: FileType| -> Option<PathBuf> {
+                siblings.iter().find(|s| Self::get_file_type(&ext(s)) == wanted).map(|s| (*s).clone())
+            };
+            // صورة حية: فيديو الصورة الحية بصورة heic بنفس الاسم
+            let live_photo = || siblings.iter().find(|s| matches!(ext(s).as_str(), "heic" | "heif")).map(|s| (*s).clone());
+            let is_companion_ext = COMPANION_EXTENSIONS.contains(&e.as_str());
+            let master = match e.as_str() {
+                "srt" | "ass" | "vtt" => find(FileType::Video),
+                "xmp" | "aae" => find(FileType::Image),
+                "mov" | "m4v" => live_photo(),
+                _ => None,
+            };
+            match master {
+                Some(m) => companions.push((path.clone(), m)),
+                // مرافق بلا رئيسي: يبقى مكانه ولا يُنقل
+                None if is_companion_ext => {}
+                None => masters.push(path.clone()),
+            }
+        }
+        (masters, companions)
+    }
+
+    /// مسار غير مستعمل (لا ملف عليه ولا محجوز في الخطة) بلاحقة (2) فما بعد
+    fn free_path(path: &Path, reserved: &mut HashSet<String>) -> PathBuf {
+        let lower = |p: &Path| p.to_string_lossy().to_lowercase();
+        if !path.exists() && !reserved.contains(&lower(path)) {
+            reserved.insert(lower(path));
+            return path.to_path_buf();
+        }
+        let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        let ext = path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+        let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let mut n = 2;
+        loop {
+            let candidate = if ext.is_empty() {
+                dir.join(format!("{stem} ({n})"))
+            } else {
+                dir.join(format!("{stem} ({n}).{ext}"))
+            };
+            if !candidate.exists() && !reserved.contains(&lower(&candidate)) {
+                reserved.insert(lower(&candidate));
+                return candidate;
+            }
+            n += 1;
+        }
     }
 
     pub fn execute(plan: &Plan, progress: &AtomicUsize) -> RunResult {
         let mut result = RunResult::default();
+        let lower = |p: &Path| p.to_string_lossy().to_lowercase();
+        // أهداف تطابق مصادر أخرى تعني تبديلاً (photo.jpg ↔ photo (1).jpg):
+        // تُنقل هذه الملفات أولاً إلى اسم مؤقت ثم إلى هدفها، فلا يتبادل ملفان اسميهما.
+        let sources: HashSet<String> = plan.moves.iter().map(|m| lower(&m.from)).collect();
+        let mut staged: Vec<(PlannedMove, PathBuf)> = Vec::new();
         for m in &plan.moves {
-            let ok = m.to.parent().is_some_and(|dir| fs::create_dir_all(dir).is_ok()) && Self::move_file(&m.from, &m.to).is_ok();
-            if ok { result.done.push(m.clone()) } else { result.failed.push(m.clone()) }
+            let needs_temp = sources.contains(&lower(&m.to)) && m.to.exists();
+            let src = if needs_temp {
+                let tmp = Self::temp_name(&m.from);
+                if Self::move_file(&m.from, &tmp).is_ok() { tmp } else { m.from.clone() }
+            } else {
+                m.from.clone()
+            };
+            staged.push((m.clone(), src));
+        }
+        for (m, src) in staged {
+            let ok = m.to.parent().is_some_and(|dir| fs::create_dir_all(dir).is_ok()) && Self::move_file(&src, &m.to).is_ok();
+            if ok {
+                result.done.push(m.clone());
+            } else {
+                // فشل: أعِد الملف من الاسم المؤقت إلى مكانه الأصلي
+                if src != m.from {
+                    let _ = Self::move_file(&src, &m.from);
+                }
+                result.failed.push(m.clone());
+            }
             progress.fetch_add(1, Ordering::Relaxed);
         }
         Self::remove_emptied_dirs(result.done.iter().map(|m| &m.from), &plan.source, |_| true);
         result
+    }
+
+    /// اسم مؤقت بجانب الملف لكسر التبديل بين اسمين
+    fn temp_name(path: &Path) -> PathBuf {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        path.with_file_name(format!(".{name}.arraytmp"))
     }
 
     /// إرجاع الملفات إلى أماكنها الأصلية. لا يكتب فوق أي ملف موجود.
@@ -626,7 +812,7 @@ impl OrganizerEngine {
             FileType::Video => Kind::Video,
             FileType::Audio => Kind::Audio,
             FileType::Document => Kind::Document,
-            FileType::Archive | FileType::Other => Kind::Other,
+            FileType::Archive | FileType::Installer | FileType::Other => Kind::Other,
         }
     }
 
@@ -673,12 +859,13 @@ impl OrganizerEngine {
         (!clean.is_empty()).then_some(clean)
     }
 
-    /// يرجع (عمليات النقل، عدد الملفات الموجودة أصلاً في مكانها الصحيح)
-    fn plan_moves(files: Vec<(RawFileInfo, PathBuf)>) -> (Vec<PlannedMove>, usize) {
+    /// يرجع (عمليات النقل، عدد الملفات الموجودة أصلاً في مكانها الصحيح، مكان كل ملف بعد التنفيذ)
+    fn plan_moves(files: Vec<(RawFileInfo, PathBuf)>) -> (Vec<PlannedMove>, usize, HashMap<PathBuf, PathBuf>) {
         // أسماء محجوزة داخل الخطة نفسها (بأحرف صغيرة لأن أسماء ويندوز لا تفرّق بين الحالة)
         let mut reserved: HashSet<String> = HashSet::new();
         let mut moves = Vec::new();
         let mut in_place = 0;
+        let mut finals: HashMap<PathBuf, PathBuf> = HashMap::new();
         let lower = |p: &Path| p.to_string_lossy().to_lowercase();
 
         for (f, target_dir) in files {
@@ -697,11 +884,12 @@ impl OrganizerEngine {
             if lower(&dest_path) == source_key {
                 in_place += 1;
             } else {
-                moves.push(PlannedMove { from: f.path, to: dest_path });
+                moves.push(PlannedMove { from: f.path.clone(), to: dest_path.clone() });
             }
+            finals.insert(f.path, dest_path);
         }
 
-        (moves, in_place)
+        (moves, in_place, finals)
     }
 }
 
@@ -791,7 +979,7 @@ pub(crate) mod tests {
     /// صورة JPEG صغيرة فيها EXIF: DateTimeOriginal داخل Exif IFD كما في الصور الحقيقية
     pub(crate) fn jpeg_with_date(path: &Path, date: &str) {
         let mut tiff = Vec::new();
-        tiff.extend(b"II* ");
+        tiff.extend(b"II*\x00");
         tiff.extend(8u32.to_le_bytes()); // IFD0 عند البايت 8
         // IFD0: مؤشر واحد إلى Exif IFD (0x8769) عند البايت 26
         tiff.extend(1u16.to_le_bytes());
@@ -807,10 +995,10 @@ pub(crate) mod tests {
         tiff.extend(20u32.to_le_bytes());
         tiff.extend(44u32.to_le_bytes());
         tiff.extend(0u32.to_le_bytes());
-        let mut text = format!("{date} ").into_bytes();
+        let mut text = format!("{date}\x00").into_bytes();
         text.resize(20, 0);
         tiff.extend(text);
-        let mut app1 = b"Exif  ".to_vec();
+        let mut app1 = b"Exif\x00\x00".to_vec();
         app1.extend(tiff);
         let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE1];
         jpeg.extend(((app1.len() + 2) as u16).to_be_bytes());
@@ -884,10 +1072,11 @@ trailer
         // مجلد السنة الموجود ("فيديو 2019") يُستخدم بدل إنشاء "2019"
         assert!(files.contains(&"Videos/فيديو 2019/2019-07-04 10-10.mp4".to_string()), "{files:?}");
         assert!(files.contains(&"Videos/2021/2021-01-01 واتساب.mp4".to_string()), "{files:?}");
-        // الصورة الحية: الفيديو بجانب صورته وبنفس اسمها
-        assert!(files.contains(&"Pictures/IMG 0548.heic".to_string()) && files.contains(&"Pictures/IMG 0548.mov".to_string()), "{files:?}");
-        // بلا تاريخ معروف: يبقى في مجلد الفيديو نفسه
-        assert!(files.contains(&"Videos/trip.mp4".to_string()), "{files:?}");
+        // الصورة الحية: فيديو .mov يُنقل مع صورته .heic كحزمة واحدة بنفس الاسم
+        assert!(files.contains(&"صور/2026/IMG 0548.heic".to_string()), "{files:?}");
+        assert!(files.contains(&"صور/2026/IMG 0548.mov".to_string()), "{files:?}");
+        // بلا تاريخ في الاسم: تاريخ التعديل يختار المجلد فقط
+        assert!(files.contains(&"Videos/2026/trip.mp4".to_string()), "{files:?}");
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -896,7 +1085,7 @@ trailer
         let root = temp_tree("videos_off", &["20190704_101010.mp4"]);
         let (_, result) = organize(&root, &Options { videos_by_year: false, ..Options::default() });
         assert!(result.failed.is_empty());
-        assert_eq!(tree(&root), ["Videos/2019-07-04 10-10.mp4"]);
+        assert_eq!(tree(&root), ["فيديو/2019-07-04 10-10.mp4"]);
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -908,11 +1097,23 @@ trailer
         let (plan, result) = organize(&root, &rebuild());
 
         assert!(result.failed.is_empty());
-        assert_eq!(tree(&root), ["Documents/cv.pdf", "Videos/clip.mp4", "صور/cat.png", "صور/sea.jpg"]);
+        assert_eq!(
+            tree(&root),
+            ["صور/2026/cat.png", "صور/2026/sea.jpg", "فيديو/2026/clip.mp4", "مستندات/PDF/cv.pdf"]
+        );
         assert!(!root.join("رحلة 2023").exists());
-        assert_eq!(plan.new_dirs, [root.join("Documents"), root.join("Videos")]);
-        // cat.png في مكانه الصحيح أصلاً فلا يتحرك
-        assert_eq!(plan.in_place, 1);
+        assert_eq!(
+            plan.new_dirs,
+            [
+                root.join("صور/2026"),
+                root.join("فيديو"),
+                root.join("فيديو/2026"),
+                root.join("مستندات"),
+                root.join("مستندات/PDF"),
+            ]
+        );
+        // كل ملف دخل مجلد سنته: لا شيء في مكانه الأصلي
+        assert_eq!(plan.in_place, 0);
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -929,10 +1130,11 @@ trailer
 
         organize(&root, &rebuild());
 
-        assert!(root.join("Photos/sea.jpg").exists());
+        assert!(root.join("Photos/2026/sea.jpg").exists());
         assert!(root.join("الموسيقى/منوعات/song.mp3").exists());
-        assert!(root.join("مستندات/cv.docx").exists());
-        assert!(!root.join("Pictures").exists() && !root.join("Music").exists() && !root.join("Documents").exists());
+        assert!(root.join("مستندات/Word/cv.docx").exists());
+        // لم تُنشأ مجلدات فئات جديدة بالاسم الافتراضي: المجلدات الموجودة كافية
+        assert!(!root.join("صور").exists() && !root.join("صوتيات").exists() && !root.join("Pictures").exists());
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -977,7 +1179,7 @@ trailer
 
         organize(&root, &rebuild());
 
-        assert!(root.join("Music (Array)/منوعات/song.mp3").exists());
+        assert!(root.join("صوتيات/منوعات/song.mp3").exists());
         assert_eq!(fs::read_dir(root.join("Music")).unwrap().count(), 2);
         fs::remove_dir_all(&root).unwrap();
     }
@@ -1003,13 +1205,13 @@ trailer
         assert_eq!(result.done.len(), 6);
         assert!(result.failed.is_empty());
         // رقم الحلقة يبقى في الاسم
-        assert!(root.join("Music/الشيخ محمد/الحلقة 1 - الشيخ محمد.mp3").exists(), "{:?}", tree(&root));
-        assert!(root.join("Music/الشيخ محمد/الحلقة 2 - الشيخ محمد.mp3").exists());
-        assert!(root.join("Music/الشيخ محمد/الحلقة 3 - الشيخ محمد.mp3").exists());
-        assert!(root.join("Music/منوعات/song one.mp3").exists());
-        assert!(root.join("Pictures/IMG 001.jpg").exists());
-        // الأقواس ذات المعنى تبقى في الاسم
-        assert!(root.join("Documents/report (final).pdf").exists());
+        assert!(root.join("صوتيات/الشيخ محمد/الحلقة 1 - الشيخ محمد.mp3").exists(), "{:?}", tree(&root));
+        assert!(root.join("صوتيات/الشيخ محمد/الحلقة 2 - الشيخ محمد.mp3").exists());
+        assert!(root.join("صوتيات/الشيخ محمد/الحلقة 3 - الشيخ محمد.mp3").exists());
+        assert!(root.join("صوتيات/منوعات/song one.mp3").exists());
+        assert!(root.join("صور/2026/IMG 001.jpg").exists());
+        // الأقواس ذات المعنى تبقى في الاسم، والمستند تحت مجلد نوعه
+        assert!(root.join("مستندات/PDF/report (final).pdf").exists());
         // المجلدات المخفية ومجلدات البرامج لا تُلمس
         assert!(root.join("repo/.git/notes.txt").exists());
         assert!(root.join("repo/readme.txt").exists());
@@ -1045,10 +1247,12 @@ trailer
 
         let plan = OrganizerEngine::plan(&root, &rebuild()).unwrap();
 
-        // Photos مجلد صور موجود: sea.jpg في مكانه، و loose.jpg وحده ينتقل إليه
-        let moved: Vec<_> = plan.moves.iter().map(|m| m.from.strip_prefix(&root).unwrap().to_path_buf()).collect();
-        assert_eq!(moved, vec![PathBuf::from("loose.jpg")]);
-        assert_eq!(plan.moves[0].to, root.join("Photos").join("loose.jpg"));
+        // Photos مجلد صور موجود: كل صورة تنتقل إلى مجلد سنتها داخله (التعديل يختار المجلد فقط)
+        let mut moved: Vec<_> = plan.moves.iter().map(|m| m.from.strip_prefix(&root).unwrap().to_path_buf()).collect();
+        moved.sort();
+        assert_eq!(moved, vec![PathBuf::from("Photos\\sea.jpg"), PathBuf::from("loose.jpg")]);
+        let loose = plan.moves.iter().find(|m| m.from == root.join("loose.jpg")).unwrap();
+        assert_eq!(loose.to, root.join("Photos").join("2026").join("loose.jpg"));
         let mut skipped: Vec<_> = plan.skipped.iter().map(|(p, _)| p.file_name().unwrap().to_string_lossy().to_string()).collect();
         skipped.sort();
         assert_eq!(skipped, ["Game", "Lib", "MyProject", "MyTool", "SavedPage", "Scripts"]);
@@ -1056,11 +1260,15 @@ trailer
     }
 
     #[test]
-    fn refuses_to_organize_a_program_folder_itself() {
-        let root = temp_tree("tool_root", &["tool.exe", "data.txt"]);
-        let err = OrganizerEngine::plan(&root, &rebuild()).err().unwrap();
+    fn an_installer_alone_does_not_make_a_folder_a_program() {
+        // مجلد فيه مكتبة برنامج: يبقى مرفوضاً كما كان
+        let root = temp_tree("tool_root", &["App/tool.exe", "App/core.dll", "Download/setup.exe", "Download/photo.jpg"]);
+        let err = OrganizerEngine::plan(&root.join("App"), &rebuild()).err().unwrap();
         assert!(err.contains("program"), "{err}");
-        assert!(root.join("data.txt").exists());
+        // مجلد تنزيلات فيه مثبّت واحد: يُرتَّب والمثبّت يذهب إلى «مثبّتات» (بند 17)
+        let plan = OrganizerEngine::plan(&root.join("Download"), &rebuild()).unwrap();
+        assert!(plan.moves.iter().any(|m| m.to.ends_with("مثبّتات/setup.exe")), "{:?}", plan.moves);
+        assert!(root.join("Download/photo.jpg").exists());
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1075,7 +1283,7 @@ trailer
             .map(|m| m.to.strip_prefix(&root).unwrap().components().next().unwrap().as_os_str().to_string_lossy().to_string())
             .collect();
         targets.sort();
-        assert_eq!(targets, ["Archives", "Documents", "Music", "Pictures", "Videos"]);
+        assert_eq!(targets, ["تسجيلات", "صور", "فيديو", "مستندات", "مضغوطات"]);
         // اختصارات وقواعد بيانات وملفات غير معروفة لا تُلمس
         assert_eq!(plan.moves.len(), 5);
         fs::remove_dir_all(&root).unwrap();
@@ -1098,14 +1306,89 @@ trailer
 
         let files = tree(&music);
         // الأسماء الرديئة تبقى كما هي: لا مصدر موثوق لاسم جديد
-        assert!(files.contains(&"house lo/4749d951].mp3".to_string()), "{files:?}");
-        assert!(files.contains(&"house lo/0750707c].mp3".to_string()), "{files:?}");
-        assert!(files.contains(&"منوعات/14c58cdd].mp3".to_string()), "{files:?}");
+        assert!(files.contains(&"تسجيلات/2026/4749d951].mp3".to_string()), "{files:?}");
+        assert!(files.contains(&"تسجيلات/2026/0750707c].mp3".to_string()), "{files:?}");
+        assert!(files.contains(&"تسجيلات/2026/14c58cdd].mp3".to_string()), "{files:?}");
         // ولا تاريخ تعديل يُضاف إلى أي اسم
         assert!(!files.iter().any(|f| f.contains(" - 20")), "{files:?}");
         // الاسم المفهوم لا يتغير
         assert!(files.contains(&"منوعات/Ma Yehtaj.mp3".to_string()), "{files:?}");
-        assert!(files.contains(&"Videos/YouTube.mp4".to_string()), "{files:?}");
+        assert!(files.contains(&"فيديو/2026/YouTube.mp4".to_string()), "{files:?}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn installers_are_moved_from_the_root_only() {
+        let root = temp_tree("installers", &["setup.exe", "setup.msi", "tools/helper.exe", "photo.jpg"]);
+        organize(&root, &rebuild());
+        let files = tree(&root);
+        assert!(files.contains(&"مثبّتات/setup.exe".to_string()), "{files:?}");
+        assert!(files.contains(&"مثبّتات/setup.msi".to_string()), "{files:?}");
+        // مثبّت داخل مجلد فرعي: مجلد البرنامج يبقى كما هو
+        assert!(files.contains(&"tools/helper.exe".to_string()), "{files:?}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_package_moves_and_is_named_with_its_master() {
+        let root = temp_tree("package", &["VID_20240102_101010.mp4", "VID_20240102_101010.srt", "photo.jpg", "photo.xmp", "lone.srt"]);
+        organize(&root, &rebuild());
+        let files = tree(&root);
+        let video = files.iter().find(|f| f.ends_with(".mp4")).expect("missing video").clone();
+        let subtitle = files.iter().find(|f| f.ends_with(".srt") && f.contains("2024")).expect("missing subtitle").clone();
+        // الترجمة مع الفيديو في نفس المجلد وبنفس الاسم الجديد
+        assert_eq!(video.trim_end_matches(".mp4"), subtitle.trim_end_matches(".srt"));
+        assert!(video.starts_with("فيديو/2024/"), "{files:?}");
+        // بيانات التعديل تتبع صورتها
+        let photo = files.iter().find(|f| f.ends_with(".jpg")).expect("missing photo").clone();
+        let sidecar = files.iter().find(|f| f.ends_with(".xmp")).expect("missing xmp").clone();
+        assert_eq!(photo.trim_end_matches(".jpg"), sidecar.trim_end_matches(".xmp"));
+        // ترجمة بلا فيديو تبقى مكانها ولا تُلمس
+        assert!(files.contains(&"lone.srt".to_string()), "{files:?}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_year_splits_into_months_only_after_500_files() {
+        let root = temp_tree("year_split", &[]);
+        let photos = root.join("صور");
+        fs::create_dir_all(&photos).unwrap();
+        let make = |from: usize, to: usize| {
+            for i in from..to {
+                fs::write(photos.join(format!("IMG_20240102_{i:04}.jpg")), b"").unwrap();
+            }
+        };
+        let targets = |plan: &Plan| -> Vec<String> {
+            plan.moves.iter().map(|m| m.to.to_string_lossy().replace('\\', "/")).collect()
+        };
+
+        make(0, 500);
+        let plan = OrganizerEngine::plan(&root, &rebuild()).unwrap();
+        assert_eq!(plan.moves.len(), 500);
+        assert!(targets(&plan).iter().all(|t| !t.contains("صور/2024/01/")), "قُسمت السنة عند 500");
+
+        // الملف 501 هو بداية التقسيم إلى أشهر
+        make(500, 501);
+        let plan = OrganizerEngine::plan(&root, &rebuild()).unwrap();
+        assert_eq!(plan.moves.len(), 501);
+        assert!(targets(&plan).iter().all(|t| t.contains("صور/2024/01/")), "{:?}", targets(&plan).first());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn colliding_names_never_overwrite_each_other() {
+        let root = temp_tree("collide", &[]);
+        fs::write(root.join("photo.jpg"), b"first").unwrap();
+        fs::write(root.join("photo (1).jpg"), b"second").unwrap();
+        organize(&root, &rebuild());
+        let mut contents: Vec<String> = tree(&root)
+            .iter()
+            .map(|f| fs::read_to_string(root.join(f)).unwrap_or_default())
+            .filter(|c| !c.is_empty())
+            .collect();
+        contents.sort();
+        // لا يضيع محتوى: لا كتابة فوق أي ملف (بند 21 من التشخيص)
+        assert_eq!(contents, ["first", "second"]);
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1116,9 +1399,9 @@ trailer
         // scan1.png ملف فارغ: له تاريخ تعديل فقط
         organize(&root, &rebuild());
         let files = tree(&root);
-        assert!(files.contains(&"Pictures/scan1.png".to_string()), "{files:?}");
-        // الصورة التي لها EXIF تُسمّى
-        assert!(files.contains(&"Pictures/2024-05-12 14-30-05.jpg".to_string()), "{files:?}");
+        assert!(files.contains(&"صور/2026/scan1.png".to_string()), "{files:?}");
+        // الصورة التي لها EXIF تُسمّى وتُوضع في سنة التصوير
+        assert!(files.contains(&"صور/2024/2024-05-12 14-30-05.jpg".to_string()), "{files:?}");
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1127,7 +1410,7 @@ trailer
         let root = temp_tree("template_title", &[]);
         pdf_with_title(&root.join("4749d951.pdf"), "Microsoft Word - Document1");
         organize(&root, &rebuild());
-        assert!(tree(&root).contains(&"Documents/4749d951.pdf".to_string()), "{:?}", tree(&root));
+        assert!(tree(&root).contains(&"مستندات/PDF/4749d951.pdf".to_string()), "{:?}", tree(&root));
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1136,7 +1419,7 @@ trailer
         let root = temp_tree("doc_title", &[]);
         pdf_with_title(&root.join("4749d951.pdf"), "Annual Report 2024");
         organize(&root, &rebuild());
-        assert!(tree(&root).contains(&"Documents/Annual Report 2024.pdf".to_string()), "{:?}", tree(&root));
+        assert!(tree(&root).contains(&"مستندات/PDF/Annual Report 2024.pdf".to_string()), "{:?}", tree(&root));
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1146,7 +1429,7 @@ trailer
         jpeg_with_date(&root.join("IMG_2353.jpg"), "2024:05:12 14:30:05");
         organize(&root, &rebuild());
         assert!(
-            tree(&root).contains(&"Pictures/2024-05-12 14-30-05 IMG_2353.jpg".to_string()),
+            tree(&root).contains(&"صور/2024/2024-05-12 14-30-05 IMG_2353.jpg".to_string()),
             "{:?}",
             tree(&root)
         );
@@ -1159,8 +1442,8 @@ trailer
         organize(&root, &rebuild());
         let files = tree(&root);
         // اسم واتساب يحمل التاريخ بلا وقت، واللقطة تحمل الوقت
-        assert!(files.contains(&"Pictures/2024-05-12 واتساب.jpg".to_string()), "{files:?}");
-        assert!(files.contains(&"Pictures/2024-05-12 14-30 لقطة شاشة.png".to_string()), "{files:?}");
+        assert!(files.contains(&"صور/2024/2024-05-12 واتساب.jpg".to_string()), "{files:?}");
+        assert!(files.contains(&"صور/2024/2024-05-12 14-30 لقطة شاشة.png".to_string()), "{files:?}");
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1184,8 +1467,8 @@ trailer
         jpeg_with_date(&root.join("scan1.jpg"), "2024:05:12 14:30:05");
         organize(&root, &Options { rename_whatsapp_media: false, ..rebuild() });
         let files = tree(&root);
-        assert!(files.contains(&"Pictures/IMG-20240512-WA0003.jpg".to_string()), "{files:?}");
-        assert!(files.contains(&"Pictures/2024-05-12 14-30-05.jpg".to_string()), "{files:?}");
+        assert!(files.contains(&"صور/2024/IMG-20240512-WA0003.jpg".to_string()), "{files:?}");
+        assert!(files.contains(&"صور/2024/2024-05-12 14-30-05.jpg".to_string()), "{files:?}");
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1193,7 +1476,7 @@ trailer
     fn meaningless_names_stay_when_renaming_is_off() {
         let root = temp_tree("junk_off", &["x/4749d951].mp3"]);
         organize(&root, &Options { rename_files: false, ..rebuild() });
-        assert_eq!(tree(&root), ["Music/منوعات/4749d951].mp3"]);
+        assert_eq!(tree(&root), ["تسجيلات/2026/4749d951].mp3"]);
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1221,11 +1504,11 @@ trailer
         }
         // المجلد المختار اسمه Photo فهو مجلد الصور نفسه: الصور المتفرقة تبقى فيه، والباقي لمجلده
         let files = tree(&photo);
-        assert!(files.contains(&"IMG 0612.jpg".to_string()), "{files:?}");
+        assert!(files.contains(&"2026/IMG 0612.jpg".to_string()), "{files:?}");
         // بلا مصدر موثوق يبقى الاسم الرديء كما هو
-        assert!(files.contains(&"133649 466985853345771 200500525.jpg".to_string()), "{files:?}");
-        assert!(files.contains(&"Videos/trip.mp4".to_string()), "{files:?}");
-        assert!(files.contains(&"Documents/cv.pdf".to_string()), "{files:?}");
+        assert!(files.contains(&"2026/133649 466985853345771 200500525.jpg".to_string()), "{files:?}");
+        assert!(files.contains(&"فيديو/2026/trip.mp4".to_string()), "{files:?}");
+        assert!(files.contains(&"مستندات/PDF/cv.pdf".to_string()), "{files:?}");
         assert!(!photo.join("Pictures").exists());
         fs::remove_dir_all(&root).unwrap();
     }
@@ -1259,7 +1542,7 @@ trailer
         let files = tree(&music);
         assert!(!music.join("Single Tracks").exists() && !music.join("Unknown").exists() && !music.join("Array_Organized").exists(), "{files:?}");
         assert!(files.contains(&"منوعات/song.mp3".to_string()), "{files:?}");
-        assert!(files.contains(&"Pictures/sea.jpg".to_string()), "{files:?}");
+        assert!(files.contains(&"صور/2026/sea.jpg".to_string()), "{files:?}");
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1270,8 +1553,8 @@ trailer
 
         organize(&root, &options);
 
-        assert!(root.join("Documents/report (final).PDF").exists());
-        assert!(root.join("Pictures/IMG_001.jpg").exists());
+        assert!(root.join("مستندات/PDF/report (final).PDF").exists());
+        assert!(root.join("صور/2026/IMG_001.jpg").exists());
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1333,7 +1616,7 @@ trailer
 
         assert_eq!(undone.failed.len(), 1);
         assert_eq!(fs::read(root.join("old/report.pdf")).unwrap(), b"new");
-        assert!(root.join("Documents/report.pdf").exists());
+        assert!(root.join("مستندات/PDF/report.pdf").exists());
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1341,14 +1624,16 @@ trailer
     fn execute_never_overwrites_a_file_created_after_planning() {
         let root = temp_tree("late_clash", &["report.pdf"]);
         let plan = OrganizerEngine::plan(&root, &rebuild()).unwrap();
-        fs::create_dir_all(root.join("Documents")).unwrap();
-        fs::write(root.join("Documents/report.pdf"), b"other").unwrap();
+        // ملف جديد ظهر في الوجهة بعد التخطيط
+        let dest = plan.moves[0].to.clone();
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        fs::write(&dest, b"other").unwrap();
 
         let result = OrganizerEngine::execute(&plan, &AtomicUsize::new(0));
 
         assert_eq!(result.failed.len(), 1);
         assert!(root.join("report.pdf").exists());
-        assert_eq!(fs::read(root.join("Documents/report.pdf")).unwrap(), b"other");
+        assert_eq!(fs::read(&dest).unwrap(), b"other");
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1364,7 +1649,7 @@ trailer
 
         assert_eq!((result.done.len(), result.failed.len()), (1, 1));
         assert!(root.join("locked.pdf").exists());
-        assert!(!root.join("Documents/locked.pdf").exists());
+        assert!(!root.join("مستندات/PDF/locked.pdf").exists());
         drop(lock);
         fs::remove_dir_all(&root).unwrap();
     }

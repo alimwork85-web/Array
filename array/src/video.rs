@@ -14,6 +14,10 @@ const MP4_EPOCH_OFFSET: i64 = 2_082_844_800;
 
 /// سنة تصوير الفيديو: من الاسم أولاً، ثم من تاريخ الإنشاء داخل الملف (MP4/MOV/M4V/3GP).
 /// لا يُستخدم تاريخ تعديل الملف لأن النسخ من الجوال يغيّره إلى يوم النسخ.
+///
+/// اختيار مجلد السنة صار عبر `naming::folder_date` (الذي يزيد رجوعاً إلى تاريخ التعديل
+/// **للمجلد فقط**)، وتبقى هذه الدالة واختباراتها مرجعاً للسلوك القديم.
+#[allow(dead_code)]
 pub fn year(path: &Path) -> Option<i32> {
     let stem = path.file_stem()?.to_string_lossy();
     naming::year_from_name(&stem).filter(|y| plausible(*y)).or_else(|| creation_year(path))

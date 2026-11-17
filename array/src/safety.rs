@@ -128,12 +128,45 @@ impl SafetyChecker {
             None => Ok(()),
             // ملف تثبيت داخل Downloads أو Desktop لا يجعلها مجلد برنامج
             Some(ProgramFolder::Program(_) | ProgramFolder::Config(_)) if is_user_library => Ok(()),
+            // مجلد فيه مثبّتات فقط (setup.exe) ليس برنامجاً: المثبّتات فئة تُرتَّب
+            Some(ProgramFolder::Program(_)) if Self::only_installers(path) => Ok(()),
             Some(kind) => Err(if crate::i18n::ar() {
                 format!("هذا المجلد فيه {}. نقل ملفاته قد يوقفه عن العمل، لذلك لن يرتّبه Array.", kind.reason())
             } else {
                 format!("This folder belongs to a {}. Moving its files could stop it from working, so Array will not organize it.", kind.reason())
             }),
         }
+    }
+
+    /// هل كل ملفات البرامج في جذر المجلد مثبّتات (.exe/.msi)؟ عندها المجلد ليس برنامجاً
+    /// بل مجلد تنزيلات، والمثبّتات تُنقل إلى مجلد «مثبّتات».
+    /// ملف مكتبة أو سكريبت أو إعدادات واحد يجعل الجواب false (تبقى الحماية).
+    fn only_installers(dir: &Path) -> bool {
+        let Ok(entries) = fs::read_dir(dir) else { return false };
+        let mut saw_installer = false;
+        for entry in entries.flatten() {
+            if entry.metadata().is_ok_and(|m| Self::is_hidden_or_system(&m) || m.is_dir()) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            let Some(ext) = Path::new(&name).extension().map(|e| e.to_string_lossy().to_string()) else {
+                continue;
+            };
+            if ext == "exe" || ext == "msi" {
+                saw_installer = true;
+                continue;
+            }
+            if PROJECT_MARKERS.contains(&name.as_str())
+                || PROJECT_EXTENSIONS.contains(&ext.as_str())
+                || LIBRARY_EXTENSIONS.contains(&ext.as_str())
+                || SCRIPT_EXTENSIONS.contains(&ext.as_str())
+                || CONFIG_EXTENSIONS.contains(&ext.as_str())
+                || PROGRAM_EXTENSIONS.contains(&ext.as_str())
+            {
+                return false;
+            }
+        }
+        saw_installer
     }
 
     /// هل يجب تخطّي هذا المجلد الفرعي بالاسم (مخفي أو مجلد نظام/برامج)؟
@@ -298,12 +331,19 @@ mod tests {
             "Project/package.json",
         ]);
 
-        assert!(SafetyChecker::check_root(&root.join("MyTool")).is_err());
+        // مجلد فيه مثبّت واحد فقط لم يعد يُرفض: المثبّت فئة تُنقل إلى «مثبّتات» (بند 17)
+        assert!(SafetyChecker::check_root(&root.join("MyTool")).is_ok());
         assert!(SafetyChecker::check_root(&root.join("Project")).is_err());
         // سكريبت على سطح المكتب قد يعتمد على الملفات المجاورة له
         assert!(SafetyChecker::check_root(&root.join("Desktop")).is_err());
         // ملف تثبيت في Downloads لا يمنع تنظيمها
         assert!(SafetyChecker::check_root(&root.join("Downloads")).is_ok());
+        // مكتبة أو سكريبت أو كود مع المثبّت تُبقي الحماية
+        let guarded = temp_tree("root_guarded", &["App/app.exe", "App/core.dll", "Site/page.html", "Hold/setup.exe", "Hold/install.bat"]);
+        assert!(SafetyChecker::check_root(&guarded.join("App")).is_err());
+        assert!(SafetyChecker::check_root(&guarded.join("Site")).is_err());
+        assert!(SafetyChecker::check_root(&guarded.join("Hold")).is_err());
+        fs::remove_dir_all(&guarded).unwrap();
         fs::remove_dir_all(&root).unwrap();
     }
 }

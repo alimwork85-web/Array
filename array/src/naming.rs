@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Datelike, Local, NaiveDateTime};
 
 use std::sync::LazyLock;
 
@@ -204,6 +204,21 @@ pub fn trusted_date(path: &Path, kind: Kind) -> Option<(String, DateSource)> {
         Kind::Audio => date_from_name(&stem).map(|d| (d, DateSource::FromName)),
         _ => None,
     }
+}
+
+/// تاريخ اختيار مجلد السنة (السنة والشهر): المصدر الموثوق للتصوير، ثم تاريخ التعديل
+/// **لاختيار المجلد فقط** — لا يدخل أي اسم ملف.
+pub fn folder_date(path: &Path, kind: Kind) -> Option<(i32, u32)> {
+    if let Some((date, _)) = trusted_date(path, kind) {
+        let year = date.get(0..4).and_then(|y| y.parse::<i32>().ok());
+        let month = date.get(5..7).and_then(|m| m.parse::<u32>().ok());
+        if let (Some(year), Some(month)) = (year, month) {
+            return Some((year, month));
+        }
+    }
+    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    let local: DateTime<Local> = modified.into();
+    Some((local.year(), local.month()))
 }
 
 /// تركيب الاسم: التاريخ أولاً ثم الوسم. لا مدة، ولا تاريخ تعديل.
