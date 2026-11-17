@@ -111,10 +111,10 @@ fn cp1252_byte(c: char) -> Option<u8> {
     MAP.iter().find(|(m, _)| *m == c).map(|(_, b)| *b)
 }
 
-/// أسماء محجوزة في ويندوز: ملف باسم CON أو NUL لا يُنشأ أصلاً
-const RESERVED_NAMES: [&str; 22] = [
-    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
-    "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+/// أسماء محجوزة في ويندوز: ملف باسم CON أو NUL لا يُنشأ أصلاً (و`con.tar` جهاز أيضًا)
+const RESERVED_NAMES: [&str; 24] = [
+    "con", "prn", "aux", "nul", "com0", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
+    "lpt0", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
 ];
 
 /// أقصى طول لاسم الملف (مع الامتداد واللاحقة) حتى يبقى المسار الكامل داخل حد ويندوز
@@ -129,9 +129,10 @@ pub fn sanitize_filename(name: &str) -> String {
 
     // ويندوز يحذف النقاط والمسافات في نهاية اسم الملف أو المجلد بصمت
     let mut trimmed = cleaned.trim().trim_end_matches('.').trim().to_string();
-    // الاسم المحجوز يُستعمل مع إضافة تحفظه من الحجز
-    if RESERVED_NAMES.contains(&trimmed.to_lowercase().as_str()) {
-        trimmed.push('_');
+    // الاسم المحجوز يُستعمل قبل أول نقطة (ويندوز يعتبر con.tar جهازًا) مع إضافة تحفظه من الحجز
+    let head_len = trimmed.find('.').unwrap_or(trimmed.len());
+    if RESERVED_NAMES.contains(&trimmed[..head_len].to_lowercase().as_str()) {
+        trimmed.insert(head_len, '_');
     }
     if trimmed.chars().count() > MAX_NAME_CHARS {
         trimmed = trimmed.chars().take(MAX_NAME_CHARS).collect::<String>().trim_end().to_string();
@@ -177,6 +178,11 @@ mod tests {
         assert_eq!(sanitize_filename("CON"), "CON_");
         assert_eq!(sanitize_filename("nul"), "nul_");
         assert_eq!(sanitize_filename("CONSOLE"), "CONSOLE");
+        // الحجز يُفحص قبل أول نقطة، وcom0/lpt0 محجوزان أيضًا
+        assert_eq!(sanitize_filename("con.tar.txt"), "con_.tar.txt");
+        assert_eq!(sanitize_filename("COM0.log"), "COM0_.log");
+        assert_eq!(sanitize_filename("lpt0"), "lpt0_");
+        assert_eq!(sanitize_filename("console.tar"), "console.tar");
         assert_eq!(sanitize_filename(&"ا".repeat(300)).chars().count(), 120);
     }
 }

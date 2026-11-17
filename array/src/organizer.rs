@@ -1185,6 +1185,13 @@ impl OrganizerEngine {
         count
     }
 
+    /// «الاسم المرقّم»: نسخة صنعها ويندوز عند تكرار الاسم — تنتهي بـ(رقم)
+    fn is_numbered(stem: &str) -> bool {
+        stem.strip_suffix(')')
+            .and_then(|s| s.rsplit_once('('))
+            .is_some_and(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    }
+
     /// ترتيب نسخ متطابقة المحتوى: يرجّع النسخ التي تُنقل للمراجعة (كل ما عدا الأصل)
     fn rank_copies(files: &[(RawFileInfo, PathBuf)], group: &[usize]) -> Vec<usize> {
         let mut ranked: Vec<(u64, bool, bool, String, usize)> = group
@@ -1199,7 +1206,7 @@ impl OrganizerEngine {
                     .unwrap_or(u64::MAX);
                 let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
                 let vague = naming::is_junk_name(&stem);
-                let numbered = stem.contains("(1)") || stem.contains("(2)");
+                let numbered = Self::is_numbered(&stem);
                 (stamp, vague, numbered, stem, i)
             })
             .collect();
@@ -2036,6 +2043,16 @@ trailer
         let (plan, _) = organize(&root, &rebuild());
         assert_eq!(plan.duplicates, 1);
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn numbered_copies_are_recognised_at_the_end_of_the_name() {
+        // نسخ ويندوز: أي رقم، لا (1) و(2) فقط
+        assert!(OrganizerEngine::is_numbered("عقد الإيجار (12)"));
+        assert!(OrganizerEngine::is_numbered("photo (1)"));
+        assert!(!OrganizerEngine::is_numbered("photo (1) final"));
+        assert!(!OrganizerEngine::is_numbered("chapter (2 of 5)"));
+        assert!(!OrganizerEngine::is_numbered("report (duplicate)"));
     }
 
     #[test]
