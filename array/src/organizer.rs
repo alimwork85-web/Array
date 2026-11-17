@@ -43,6 +43,9 @@ const CATEGORY_FOLDERS: [(&str, &str); 7] = [
 /// تُقسم السنة إلى مجلدات أشهر إذا تجاوز عدد ملفاتها هذا الحد (ثابت واحد، بلا خيار للمستخدم)
 const YEAR_SPLIT_LIMIT: usize = 500;
 
+/// مجلد النسخ المكررة للمراجعة: لا حذف أبداً، والتراجع يعيدها
+const DUPLICATES_FOLDER: &str = "مكررات للمراجعة";
+
 /// ملفات ترافق ملفاً رئيسياً: الترجمة مع الفيديو، وبيانات التعديل مع الصورة
 const COMPANION_EXTENSIONS: [&str; 5] = ["srt", "ass", "vtt", "xmp", "aae"];
 
@@ -191,6 +194,8 @@ pub struct Plan {
     pub in_place: usize,
     /// ملفات داخل مجلدات المستخدم الموجودة تُركت كما هي (خيار keep_existing_folders)
     pub kept_in_folders: usize,
+    /// عدد النسخ المكررة التي ستُنقل إلى «مكررات للمراجعة»
+    pub duplicates: usize,
     /// مجلدات برامج أو مشاريع لم يُلمس أي شيء داخلها، مع السبب
     pub skipped: Vec<(PathBuf, String)>,
 }
@@ -619,7 +624,7 @@ impl OrganizerEngine {
             })
             .collect();
 
-        let (mut moves, in_place, finals) = Self::plan_moves(targeted);
+        let (mut moves, in_place, finals, duplicates) = Self::plan_moves(targeted, source_path);
         // المرافق يتبع رئيسيه: نفس المجلد ونفس الاسم الجديد
         let mut reserved: HashSet<String> = moves.iter().map(|m| m.to.to_string_lossy().to_lowercase()).collect();
         for (companion, master) in companions {
@@ -652,6 +657,7 @@ impl OrganizerEngine {
             new_dirs,
             in_place,
             kept_in_folders,
+            duplicates,
             skipped,
         })
     }
@@ -952,8 +958,10 @@ impl OrganizerEngine {
         (!clean.is_empty()).then_some(clean)
     }
 
-    /// يرجع (عمليات النقل، عدد الملفات الموجودة أصلاً في مكانها الصحيح، مكان كل ملف بعد التنفيذ)
-    fn plan_moves(files: Vec<(RawFileInfo, PathBuf)>) -> (Vec<PlannedMove>, usize, HashMap<PathBuf, PathBuf>) {
+    /// يرجع (عمليات النقل، عدد الملفات الموجودة أصلاً في مكانها الصحيح، مكان كل ملف بعد التنفيذ،
+    /// عدد المكررات التي أُرسلت للمراجعة)
+    fn plan_moves(mut files: Vec<(RawFileInfo, PathBuf)>, source_path: &Path) -> (Vec<PlannedMove>, usize, HashMap<PathBuf, PathBuf>, usize) {
+        let duplicates = Self::redirect_duplicates(&mut files, source_path);
         // أسماء محجوزة داخل الخطة نفسها (بأحرف صغيرة لأن أسماء ويندوز لا تفرّق بين الحالة)
         let mut reserved: HashSet<String> = HashSet::new();
         let mut moves = Vec::new();
@@ -982,7 +990,78 @@ impl OrganizerEngine {
             finals.insert(f.path, dest_path);
         }
 
-        (moves, in_place, finals)
+        (moves, in_place, finals, duplicates)
+    }
+
+    /// المكررات: تجميع بالحجم أولاً، ثم بصمة المحتوى للأحجام المتساوية فقط،
+    /// ثم داخل كل مجموعة محتوى واحدة يُختار الأصل: الأقدم تاريخًا، وعند التساوي
+    /// الاسم الأوضح (غير الرديء وبلا لاحقة «(1)»). الباقي إلى «مكررات للمراجعة». لا حذف.
+    fn redirect_duplicates(files: &mut [(RawFileInfo, PathBuf)], source_path: &Path) -> usize {
+        let mut by_size: HashMap<u64, Vec<usize>> = HashMap::new();
+        for (i, (f, _)) in files.iter().enumerate() {
+            // الملف الفارغ ليس نسخة مكررة: كل الملفات الفارغة متطابقة بلا معنى
+            if let Ok(meta) = fs::metadata(&f.path) {
+                if meta.is_file() && meta.len() > 0 {
+                    by_size.entry(meta.len()).or_default().push(i);
+                }
+            }
+        }
+        let review_dir = source_path.join(DUPLICATES_FOLDER);
+        let mut count = 0;
+        for indices in by_size.values().filter(|v| v.len() > 1) {
+            let mut by_digest: HashMap<u64, Vec<usize>> = HashMap::new();
+            for &i in indices {
+                if let Some(digest) = Self::digest(&files[i].0.path) {
+                    by_digest.entry(digest).or_default().push(i);
+                }
+            }
+            for group in by_digest.values().filter(|v| v.len() > 1) {
+                for i in Self::rank_copies(files, group) {
+                    files[i].1 = review_dir.clone();
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    /// ترتيب نسخ متطابقة المحتوى: يرجّع النسخ التي تُنقل للمراجعة (كل ما عدا الأصل)
+    fn rank_copies(files: &[(RawFileInfo, PathBuf)], group: &[usize]) -> Vec<usize> {
+        let mut ranked: Vec<(u64, bool, bool, String, usize)> = group
+            .iter()
+            .map(|&i| {
+                let path = &files[i].0.path;
+                let stamp = fs::metadata(path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(u64::MAX);
+                let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                let vague = naming::is_junk_name(&stem);
+                let numbered = stem.contains("(1)") || stem.contains("(2)");
+                (stamp, vague, numbered, stem, i)
+            })
+            .collect();
+        ranked.sort();
+        ranked.into_iter().skip(1).map(|(_, _, _, _, i)| i).collect()
+    }
+
+    /// بصمة محتوى الملف (SipHash-1-3، 64 بت). تُحسب للأحجام المتساوية فقط.
+    /// ponytail: تصادم نظري 1 من 2^64؛ لو احتجت يقينًا بايتًا ببايت فقارن الملفين مباشرة.
+    fn digest(path: &Path) -> Option<u64> {
+        use std::hash::Hasher;
+        use std::io::Read;
+        let mut file = fs::File::open(path).ok()?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = file.read(&mut buf).ok()?;
+            if n == 0 {
+                return Some(hasher.finish());
+            }
+            hasher.write(&buf[..n]);
+        }
     }
 }
 
@@ -1676,6 +1755,72 @@ trailer
         fs::remove_dir_all(&root).unwrap();
     }
 
+    /// تاريخ تعديل ثابت للملف (لاختبار «الأقدم يبقى»)
+    fn set_modified(path: &Path, secs: u64) {
+        let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)).unwrap();
+    }
+
+    #[test]
+    fn duplicates_are_judged_by_content_not_by_name() {
+        let root = temp_tree("dups_content", &[]);
+        // اسم شبه متطابق ومحتوى مختلف: ليسا مكررين
+        fs::write(root.join("photo.jpg"), b"first-content").unwrap();
+        fs::write(root.join("photo (1).jpg"), b"second-cont").unwrap();
+        // اسمان مختلفان ومحتوى واحد: مكرران
+        fs::write(root.join("أ.txt"), b"identical").unwrap();
+        fs::write(root.join("ب.txt"), b"identical").unwrap();
+
+        let (plan, _) = organize(&root, &rebuild());
+
+        assert_eq!(plan.duplicates, 1);
+        let files = tree(&root);
+        let review: Vec<_> = files.iter().filter(|f| f.starts_with("مكررات للمراجعة/")).collect();
+        assert_eq!(review.len(), 1, "{files:?}");
+        // الملفان المختلفان بقيا كلاهما
+        assert_eq!(files.iter().filter(|f| f.contains("photo")).count(), 2, "{files:?}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn three_copies_keep_the_clearest_oldest_name_and_review_the_rest() {
+        let root = temp_tree("dups_three", &[]);
+        for name in ["4749d951.txt", "عقد الإيجار (1).txt", "عقد الإيجار.txt"] {
+            fs::write(root.join(name), b"same bytes").unwrap();
+            set_modified(&root.join(name), 1_700_000_000);
+        }
+
+        let (plan, result) = organize(&root, &rebuild());
+        assert!(result.failed.is_empty());
+        assert_eq!(plan.duplicates, 2);
+
+        let files = tree(&root);
+        // الاسم الأوضح (بلا كود وبلا (1)) يبقى في مكانه الطبيعي
+        assert!(files.contains(&"مستندات/نصوص/عقد الإيجار.txt".to_string()), "{files:?}");
+        assert_eq!(files.iter().filter(|f| f.starts_with("مكررات للمراجعة/")).count(), 2, "{files:?}");
+
+        // التراجع يعيد النسخ الثلاث كلها
+        let undone = OrganizerEngine::undo_from_journal(&root, &AtomicUsize::new(0)).unwrap();
+        assert!(undone.failed.is_empty());
+        let files = tree(&root);
+        for name in ["4749d951.txt", "عقد الإيجار (1).txt", "عقد الإيجار.txt"] {
+            assert!(files.contains(&name.to_string()), "{name} lost: {files:?}");
+        }
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_same_size_stranger_does_not_hide_duplicates() {
+        // ملف بنفس حجم نسختين متطابقتين لكن محتواه مختلف: يجب ألا يكسر الكشف
+        let root = temp_tree("dups_mixed", &[]);
+        fs::write(root.join("photo.jpg"), b"notsame123").unwrap();
+        fs::write(root.join("a.txt"), b"identical1").unwrap();
+        fs::write(root.join("b.txt"), b"identical1").unwrap();
+        let (plan, _) = organize(&root, &rebuild());
+        assert_eq!(plan.duplicates, 1);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn a_journal_restores_a_run_that_stopped_halfway() {
         let root = temp_tree("journal_partial", &["a/1.pdf", "a/2.pdf", "a/3.pdf"]);
@@ -1725,6 +1870,7 @@ trailer
             new_dirs: plan.new_dirs.clone(),
             in_place: 0,
             kept_in_folders: 0,
+            duplicates: 0,
             skipped: Vec::new(),
         };
         OrganizerEngine::execute(&partial, &AtomicUsize::new(0));

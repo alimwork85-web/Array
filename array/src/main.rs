@@ -822,6 +822,23 @@ impl ArrayApp {
         });
         ui.add_space(12.0);
 
+        // نسخ مكررة: لا حذف، تذهب إلى «مكررات للمراجعة»
+        if plan.duplicates > 0 {
+            let note = if ar() {
+                format!(
+                    "{} إلى «مكررات للمراجعة» — لا حذف، ويمكن التراجع.",
+                    count(plan.duplicates, Noun::File)
+                )
+            } else {
+                format!(
+                    "{} go to the review folder — nothing is deleted, and you can undo.",
+                    count(plan.duplicates, Noun::File)
+                )
+            };
+            ui.label(theme::muted(rtl::for_display(&note)));
+            ui.add_space(6.0);
+        }
+
         // مجلد سحابي: النقل فيه يعني رفعاً وتنزيلاً
         if let Some(provider) = SafetyChecker::cloud_provider(&plan.source) {
             let warning = if ar() {
