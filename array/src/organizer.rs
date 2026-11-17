@@ -982,7 +982,8 @@ impl OrganizerEngine {
         let moves: Vec<PlannedMove> = journal
             .entries
             .iter()
-            .filter(|e| e.done)
+            // نقل وقع بعد آخر حفظ للبيان (قبل `journal.save`) لا يزال done=false
+            .filter(|e| e.done || (e.to.exists() && !e.from.exists()))
             .map(|e| PlannedMove { from: e.from.clone(), to: e.to.clone() })
             .collect();
         if moves.is_empty() {
@@ -2036,6 +2037,25 @@ trailer
         assert!(Journal::path(&root).is_file());
         assert!(!root.join(JOURNAL_DIR).join("history.json.tmp").exists(), "الملف المؤقت بقي بعد الحفظ");
         assert!(Journal::load(&root).is_some(), "البيان المحفوظ لا يُقرأ");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn undo_reverts_a_move_that_happened_before_the_journal_was_updated() {
+        let root = temp_tree("journal_unsaved_move", &["a/1.pdf"]);
+        let before = tree(&root);
+        let plan = OrganizerEngine::plan(&root, &rebuild()).unwrap();
+        // البيان محفوظ، ثم وقع النقل وانقطع البرنامج قبل أن يُعلَّم done
+        Journal::new(&plan.source, &plan.moves, &plan.new_dirs).save().unwrap();
+        let first = &plan.moves[0];
+        fs::create_dir_all(first.to.parent().unwrap()).unwrap();
+        fs::rename(&first.from, &first.to).unwrap();
+
+        let undone = OrganizerEngine::undo_from_journal(&root, &AtomicUsize::new(0)).unwrap();
+
+        assert_eq!(undone.done.len(), 1);
+        assert!(undone.failed.is_empty());
+        assert_eq!(tree(&root), before);
         fs::remove_dir_all(&root).unwrap();
     }
 
