@@ -11,7 +11,12 @@ fn main() {
             res.set("ProductName", "Array");
             res.set("FileDescription", "Array - organizes your files");
             res.set("OriginalFilename", "Array.exe");
-            res.set("LegalCopyright", "Array");
+            let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+            res.set("CompanyName", "Ali Alhumedi");
+            res.set("Publisher", "Ali Alhumedi");
+            res.set("LegalCopyright", "© 2026 Ali Alhumedi");
+            res.set("ProductVersion", &version);
+            res.set("FileVersion", &version);
             if let Err(e) = res.compile() {
                 eprintln!("Warning: Failed to compile icon resource: {}", e);
             }

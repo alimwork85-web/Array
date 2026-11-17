@@ -1,0 +1,43 @@
+name: build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: array
+
+      - name: Build release
+        working-directory: array
+        run: cargo build --release --locked
+
+      - name: Name the exe after the version
+        id: v
+        shell: bash
+        run: |
+          version=$(grep -m1 '^version' array/Cargo.toml | cut -d'"' -f2)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          cp array/target/release/Array.exe "Array-$version.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Array-${{ steps.v.outputs.version }}
+          path: Array-${{ steps.v.outputs.version }}.exe
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Array-${{ steps.v.outputs.version }}.exe
