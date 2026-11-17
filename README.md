@@ -32,14 +32,13 @@
 - **التراجع متاح دائماً.** زر واحد في صفحة «السجل» يعيد كل ملف إلى مكانه واسمه الأصليين.
 - **لا يمس ما رتّبته أنت.** مجلداتك الموجودة تبقى كما هي افتراضياً، ويُرتَّب فقط ما هو متفرق.
 - **لا يكسر برامجك.** مجلدات البرامج والمشاريع البرمجية والسكريبتات ومجلدات ويندوز تُتخطّى بالكامل.
-- **خصوصيتك محفوظة.** كل شيء يعمل على جهازك، بما فيه التعرّف على الوجوه. لا يُرفع أي ملف ولا يحتاج حساباً.
+- **خصوصيتك محفوظة.** كل شيء يعمل على جهازك. لا يُرفع أي ملف ولا يحتاج حساباً.
 
 ## أبرز المميزات
 
 | | |
 |---|---|
 | 🗂️ **ترتيب حسب النوع** | صور، موسيقى وصوتيات، فيديو، مستندات، ملفات مضغوطة. ويستخدم مجلداتك الموجودة إن وُجدت بالعربية أو الإنجليزية («صور»، «Pictures»…). |
-| 🧑 **الصور حسب الأشخاص** | يتعلّم الوجوه من مجلداتك الموجودة (مثل «Ali» أو «أمي») ويقترح نقل الصورة المتفرقة إلى مجلد صاحبها، فقط إذا تعرّف بوضوح على شخص واحد معروف. |
 | 🎬 **الفيديو حسب السنة** | سنة التصوير من اسم المقطع أو من بيانات الفيديو نفسه، ومقاطع «الصور الحية» من الآيفون تبقى بجانب صورتها. |
 | 🎧 **التلاوات والأغاني حسب القارئ والفنان** | يجمع المقاطع بعدة أدلة معاً: الوسوم، واسم الملف، والحلقات («الحلقة 3 - الشيخ فلان»)، والألبوم… ولا يُنشئ مجلداً لملف واحد؛ المقاطع المنفردة تذهب إلى «منوعات»، ومقاطع الذكاء الاصطناعي في مجلد خاص بها. |
 | ✏️ **أسماء أوضح** | يحذف الأكواد مثل `[AUD-…]` و`(1)`، ويصلح النص العربي المشوّه، ويعطي الملفات ذات الأسماء العشوائية اسماً من سياقها وتاريخها. يمكن إيقافه لتبقى الأسماء كما هي. |
@@ -63,9 +62,9 @@
 ## التنزيل والتشغيل
 
 - **المتطلبات:** ويندوز 10 أو 11 (64 بت). لا يحتاج إنترنت ولا تثبيت أي شيء آخر.
-- **التشغيل:** نزّل [`Array-2.0.0.exe`](https://github.com/alimwork85-web/Array/releases/latest/download/Array-2.0.0.exe) (حوالي 64 MB) وشغّله مباشرة. يمكنك وضعه في أي مجلد وعمل اختصار له.
+- **التشغيل:** نزّل [`Array-2.0.0.exe`](https://github.com/alimwork85-web/Array/releases/latest/download/Array-2.0.0.exe) (حوالي 11 MB) وشغّله مباشرة. يمكنك وضعه في أي مجلد وعمل اختصار له.
 - **تحذير ويندوز (SmartScreen):** قد يظهر عند أول تشغيل لأن الملف غير موقّع رقمياً. اختر «مزيد من المعلومات» ثم «تشغيل على أي حال».
-- **الإعدادات وسجل التراجع وذاكرة الوجوه** تُحفظ في `%APPDATA%\Array`. لإزالة البرنامج احذف ملف `exe` وهذا المجلد.
+- **الإعدادات وسجل التراجع** تُحفظ في `%APPDATA%\Array`. لإزالة البرنامج احذف ملف `exe` وهذا المجلد.
 
 ## أسئلة شائعة
 
@@ -76,15 +75,9 @@
 </details>
 
 <details>
-<summary><b>هل يرسل صوري إلى الإنترنت للتعرّف على الوجوه؟</b></summary>
+<summary><b>هل يتصل البرنامج بالإنترنت؟</b></summary>
 
-لا. نموذجا التعرّف على الوجوه (YuNet وSFace من OpenCV) مدمجان داخل البرنامج ويعملان على جهازك فقط. البرنامج لا يتصل بالإنترنت إطلاقاً.
-</details>
-
-<details>
-<summary><b>الترتيب بالوجوه بطيء في أول مرة؟</b></summary>
-
-نعم، في أول مرة يحلّل الصور وقد يستغرق دقائق حسب عددها، ثم يحفظ النتائج فتصبح المرات التالية أسرع بكثير. صور HEIC لا تُقرأ للتعرّف على الوجوه حالياً، لكنها تُرتَّب كصور عادية.
+لا. البرنامج لا يتصل بالإنترنت إطلاقاً ولا يرفع أي ملف؛ كل العمل يجري على جهازك.
 </details>
 
 <details>
@@ -114,7 +107,7 @@ cargo test
 
 ## الترخيص
 
-الكود مرخّص برخصة [MIT](LICENSE). نموذجا الوجوه من [OpenCV Zoo](https://github.com/opencv/opencv_zoo): YuNet (MIT) وSFace (Apache 2.0) — التفاصيل في [`array/models/README.md`](array/models/README.md).
+الكود مرخّص برخصة [MIT](LICENSE).
 
 </div>
 
@@ -148,14 +141,13 @@ Downloads, photos copied from your phone, audio collections… they pile up with
 - **Undo is always there.** One button on the *History* page puts every file back with its original name.
 - **Leaves what you organized alone.** Your existing folders stay as they are by default; only loose files are sorted.
 - **Won't break your programs.** Program folders, coding projects, scripts and Windows folders are skipped entirely.
-- **Private.** Everything runs on your PC, including face recognition. No uploads, no account.
+- **Private.** Everything runs on your PC. No uploads, no account.
 
 ### Features
 
 | | |
 |---|---|
 | 🗂️ **Sort by type** | Photos, music & audio, videos, documents, archives. Reuses your existing folders whether they are named in Arabic or English ("Pictures", "صور"…). |
-| 🧑 **Photos by person** | Learns faces from your existing folders (like "Ali" or "Mom") and suggests moving a loose photo into its owner's folder — only when one known person is clearly recognized. |
 | 🎬 **Videos by year** | The year comes from the file name or the video's own creation date; iPhone Live Photo videos stay next to their photo. |
 | 🎧 **Recitations & songs by reciter/artist** | Groups tracks using several clues together: tags, file name, episodes ("Episode 3 - Sheikh X"), album… Never creates a folder for a single file: singles go to a misc folder, AI-generated music to its own folder. |
 | ✏️ **Cleaner names** | Removes codes like `[AUD-…]` and `(1)`, fixes garbled Arabic text, and gives random names a name from their context and date. Can be turned off to keep names as they are. |
@@ -171,9 +163,9 @@ Downloads, photos copied from your phone, audio collections… they pile up with
 ### Download & run
 
 - **Requirements:** Windows 10 or 11 (64-bit). No internet and nothing else to install.
-- **Run:** download [`Array-2.0.0.exe`](https://github.com/alimwork85-web/Array/releases/latest/download/Array-2.0.0.exe) (about 64 MB) and run it directly — it is portable; put it in any folder and make a shortcut.
+- **Run:** download [`Array-2.0.0.exe`](https://github.com/alimwork85-web/Array/releases/latest/download/Array-2.0.0.exe) (about 11 MB) and run it directly — it is portable; put it in any folder and make a shortcut.
 - **Windows SmartScreen** may warn on first run because the file is not code-signed. Choose *More info* → *Run anyway*.
-- **Settings, the undo record and the face memory** are stored in `%APPDATA%\Array`. To remove the app, delete the `.exe` and that folder.
+- **Settings and the undo record** are stored in `%APPDATA%\Array`. To remove the app, delete the `.exe` and that folder.
 
 ### FAQ
 
@@ -184,15 +176,9 @@ No. Array only **moves and renames**, and never overwrites an existing file (if 
 </details>
 
 <details>
-<summary><b>Are my photos sent to the internet for face recognition?</b></summary>
+<summary><b>Does it connect to the internet?</b></summary>
 
-No. The face models (YuNet and SFace from OpenCV) are built into the app and run only on your PC. Array never connects to the internet.
-</details>
-
-<details>
-<summary><b>Face sorting is slow the first time?</b></summary>
-
-Yes — the first run analyzes your photos and can take a few minutes depending on how many there are; results are remembered, so later runs are much faster. HEIC photos are not read for face recognition yet, but they are still sorted as photos.
+No. Array never connects to the internet and never uploads anything; all the work happens on your PC.
 </details>
 
 <details>
@@ -222,4 +208,4 @@ The result is `array/target/release/Array.exe`.
 
 ### License
 
-The code is licensed under [MIT](LICENSE). Face models from [OpenCV Zoo](https://github.com/opencv/opencv_zoo): YuNet (MIT) and SFace (Apache 2.0) — details in [`array/models/README.md`](array/models/README.md).
+The code is licensed under [MIT](LICENSE).

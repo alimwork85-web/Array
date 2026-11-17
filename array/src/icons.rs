@@ -18,10 +18,8 @@ pub enum Icon {
     Close,
     Undo,
     Shield,
-    Person,
     Lock,
     Edit,
-    Trash,
     Drop,
     Music,
     Photo,
@@ -36,7 +34,7 @@ pub enum Icon {
 }
 
 #[cfg(test)]
-pub const ALL: [Icon; 25] = [
+pub const ALL: [Icon; 23] = [
     Icon::Organize,
     Icon::History,
     Icon::Settings,
@@ -47,10 +45,8 @@ pub const ALL: [Icon; 25] = [
     Icon::Close,
     Icon::Undo,
     Icon::Shield,
-    Icon::Person,
     Icon::Lock,
     Icon::Edit,
-    Icon::Trash,
     Icon::Drop,
     Icon::Music,
     Icon::Photo,
@@ -132,7 +128,6 @@ fn parts(icon: Icon) -> &'static [Part] {
             ]),
             Line(&[(9.0, 12.0), (11.2, 14.2), (15.4, 9.8)]),
         ],
-        Icon::Person => &[Circle(12.0, 8.0, 3.8), Arc(12.0, 21.5, 7.5, 200.0, 340.0)],
         Icon::Lock => &[
             Rect(5.0, 11.0, 19.0, 20.0, 2.0),
             Arc(12.0, 8.5, 4.0, 180.0, 360.0),
@@ -141,13 +136,6 @@ fn parts(icon: Icon) -> &'static [Part] {
             Dot(12.0, 15.5, 1.2),
         ],
         Icon::Edit => &[Closed(&[(15.0, 4.0), (20.0, 9.0), (9.0, 20.0), (4.0, 20.0), (4.0, 15.0)]), Line(&[(13.0, 6.0), (18.0, 11.0)])],
-        Icon::Trash => &[
-            Line(&[(4.0, 7.0), (20.0, 7.0)]),
-            Line(&[(9.0, 7.0), (9.0, 4.5), (15.0, 4.5), (15.0, 7.0)]),
-            Closed(&[(6.0, 7.0), (7.0, 20.0), (17.0, 20.0), (18.0, 7.0)]),
-            Line(&[(10.0, 11.0), (10.0, 16.0)]),
-            Line(&[(14.0, 11.0), (14.0, 16.0)]),
-        ],
         Icon::Drop => &[
             Line(&[(12.0, 3.0), (12.0, 14.0)]),
             Line(&[(7.5, 9.5), (12.0, 14.0), (16.5, 9.5)]),

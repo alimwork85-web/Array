@@ -1,6 +1,5 @@
 #![windows_subsystem = "windows"]
 
-mod faces;
 mod grouping;
 mod i18n;
 mod icons;
@@ -18,7 +17,7 @@ use eframe::egui::{self, RichText};
 
 use i18n::{ar, count, tr, Noun};
 use icons::Icon;
-use organizer::{Options, OrganizerEngine, Plan, PlanProgress};
+use organizer::{Options, OrganizerEngine, Plan};
 use rfd::FileDialog;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -79,7 +78,7 @@ fn load_logo(ctx: &egui::Context) -> Option<egui::TextureHandle> {
 
 /// عمل جارٍ في الخلفية حتى لا تتجمد النافذة مع المجلدات الكبيرة
 enum Job {
-    Planning(Receiver<Result<Plan, String>>, Arc<PlanProgress>),
+    Planning(Receiver<Result<Plan, String>>),
     /// تنظيم أو تراجع، مع عدّاد الملفات المنجزة لشريط التقدم
     Moving {
         restoring: bool,
@@ -117,8 +116,8 @@ struct Preview {
     plan: Plan,
     /// (اسم المجلد، عدد الملفات، موجود أم جديد، عدد مجلدات الفنانين)
     destinations: Vec<(String, usize, bool, usize)>,
-    /// (المكان الحالي، المكان الجديد، درجة الوجه إن وُجدت)
-    rows: Vec<(String, String, Option<f32>)>,
+    /// (المكان الحالي، المكان الجديد)
+    rows: Vec<(String, String)>,
     /// مجلدات برامج ومشاريع تُركت كما هي، مع السبب
     skipped: Vec<String>,
 }
@@ -161,7 +160,7 @@ impl Preview {
         let rows = plan
             .moves
             .iter()
-            .map(|m| (relative(&m.from, &plan.source), relative(&m.to, &plan.source), plan.face_matches.get(&m.from).map(|(_, s)| *s)))
+            .map(|m| (relative(&m.from, &plan.source), relative(&m.to, &plan.source)))
             .collect();
 
         let skipped = plan.skipped.iter().map(|(dir, reason)| format!("{}  —  {}", relative(dir, &plan.source), reason)).collect();
@@ -201,7 +200,6 @@ struct ArrayApp {
     undo_entries: usize,
     undo_source: Option<PathBuf>,
     confirm_undo: bool,
-    confirm_clear_faces: bool,
     show_skipped: bool,
     /// السمة المطبّقة حالياً (None قبل أول إطار)
     dark: Option<bool>,
@@ -234,7 +232,6 @@ impl ArrayApp {
             undo_entries: 0,
             undo_source: None,
             confirm_undo: false,
-            confirm_clear_faces: false,
             show_skipped: false,
             dark: None,
         };
@@ -264,7 +261,7 @@ impl ArrayApp {
     fn poll_job(&mut self) {
         let Some(job) = &self.job else { return };
         match job {
-            Job::Planning(rx, _) => match poll(rx) {
+            Job::Planning(rx) => match poll(rx) {
                 None => return,
                 Some(Ok(plan)) if plan.moves.is_empty() => {
                     let mut message = if plan.kept_in_folders > 0 {
@@ -343,13 +340,9 @@ impl ArrayApp {
         self.reload_settings();
         self.outcome = None;
         let options = self.options.clone();
-        let progress = Arc::new(PlanProgress::default());
-        let shared = progress.clone();
-        let cache = self.storage.face_cache_path();
-        self.job = Some(Job::Planning(
-            spawn_job(ctx, move || OrganizerEngine::plan_with(&path, &options, &shared, Some(&cache))),
-            progress,
-        ));
+        self.job = Some(Job::Planning(spawn_job(ctx, move || {
+            OrganizerEngine::plan_with(&path, &options)
+        })));
         self.status_message = format!("⏳ {}", tr("Scanning files…", "جارٍ فحص الملفات…"));
     }
 
@@ -666,19 +659,6 @@ impl ArrayApp {
             self.set_option(|o| o.keep_existing_folders = keep);
         }
         ui.add_space(8.0);
-        let mut by_faces = self.options.sort_by_faces;
-        let help = if detailed {
-            tr(
-                "Learns faces from folders like Ali or Mom and suggests a photo only when one known person is clearly recognized.",
-                "يتعلّم الوجوه من مجلدات مثل Ali أو Mom، ولا يقترح نقل صورة إلا إذا تعرّف بوضوح على شخص معروف واحد.",
-            )
-        } else {
-            tr("Needs 'Keep my existing folders'.", "يحتاج خيار «أبقِ مجلداتي الحالية».")
-        };
-        if theme::toggle_row(ui, keep, &mut by_faces, tr("Sort loose photos into people folders by face", "رتّب الصور المتفرقة في مجلدات الأشخاص بالوجوه"), help) {
-            self.set_option(|o| o.sort_by_faces = by_faces);
-        }
-        ui.add_space(8.0);
         let mut by_year = self.options.videos_by_year;
         let help = if detailed {
             tr(
@@ -758,27 +738,6 @@ impl ArrayApp {
     fn progress_view(&self, ui: &mut egui::Ui) {
         let p = pal();
         theme::card(ui, |ui| match &self.job {
-            Some(Job::Planning(_, progress)) if progress.total.load(Ordering::Relaxed) > 0 => {
-                let (done, total) = (progress.done.load(Ordering::Relaxed), progress.total.load(Ordering::Relaxed));
-                let stage = progress.stage.lock().unwrap().clone();
-                theme::row(ui, |ui| {
-                    icons::spinner(ui, 22.0, p.accent);
-                    ui.label(theme::strong(theme::show(&stage), 17.0));
-                });
-                ui.add_space(8.0);
-                ui.add(egui::ProgressBar::new(done as f32 / total as f32).text(format!("{} / {}", done, total)).fill(p.primary));
-                ui.add_space(4.0);
-                theme::row(ui, |ui| {
-                    icons::show(ui, Icon::Person, 16.0, p.muted);
-                    theme::para(
-                        ui,
-                        tr("The first time takes a few minutes; faces are remembered for next time.", "المرة الأولى تستغرق دقائق، ثم تُحفظ الوجوه للمرات القادمة."),
-                        13.0,
-                        p.muted,
-                        false,
-                    );
-                });
-            }
             Some(Job::Planning(..)) => {
                 theme::row(ui, |ui| {
                     icons::spinner(ui, 22.0, p.accent);
@@ -818,11 +777,10 @@ impl ArrayApp {
 
         // الأرقام الأساسية
         theme::row(ui, |ui| {
-            // عرض كل مربع = (المتاح - الهوامش والحدود 4×30 - المسافات 3×10) ÷ 4
-            let width = ((ui.available_width() - 4.0 * 30.0 - 3.0 * 10.0) / 4.0).max(100.0);
+            // عرض كل مربع = (المتاح - الهوامش والحدود 3×30 - المسافات 2×10) ÷ 3
+            let width = ((ui.available_width() - 3.0 * 30.0 - 2.0 * 10.0) / 3.0).max(100.0);
             theme::stat(ui, width, Icon::ArrowRight, plan.moves.len(), tr("to move or rename", "للنقل أو إعادة التسمية"), p.accent);
             theme::stat(ui, width, Icon::Check, plan.kept_in_folders + plan.in_place, tr("stay where they are", "تبقى في مكانها"), p.text);
-            theme::stat(ui, width, Icon::Person, plan.face_matches.len(), tr("matched by face", "عُرفت بالوجه"), p.amber);
             theme::stat(ui, width, Icon::Shield, plan.skipped.len(), tr("protected folders", "مجلدات محمية"), p.success);
         });
         ui.add_space(12.0);
@@ -848,13 +806,6 @@ impl ArrayApp {
             }
         });
         ui.add_space(4.0);
-        if !plan.people.is_empty() {
-            let line = format!("{} {}", tr("People learned from your folders:", "الأشخاص الذين تعلّم البرنامج وجوههم:"), plan.people.join(tr(", ", "، ")));
-            theme::icon_text(ui, Icon::Person, theme::muted(theme::show(&line)), p.muted);
-        }
-        if let Some(note) = &plan.face_note {
-            theme::icon_text(ui, Icon::About, theme::muted(theme::show(note)).small(), p.muted);
-        }
         if !preview.skipped.is_empty() {
             let label = if ar() {
                 format!("{} لن يُلمس", count(preview.skipped.len(), Noun::ProtectedFolder))
@@ -897,15 +848,11 @@ impl ArrayApp {
                 .auto_shrink([false, false])
                 .show_rows(ui, row_height, preview.rows.len(), |ui, range| {
                     let start = range.start;
-                    for (i, (from, to, face)) in preview.rows[range].iter().enumerate() {
+                    for (i, (from, to)) in preview.rows[range].iter().enumerate() {
                         let rect = ui.available_rect_before_wrap();
                         if (start + i) % 2 == 1 {
                             ui.painter().rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), row_height)), 6.0, p.stripe);
                         }
-                        let to = match face {
-                            Some(score) => format!("{}   ·  {} {:.0}%", to, tr("face", "وجه"), score * 100.0),
-                            None => to.clone(),
-                        };
                         theme::row(ui, |ui| {
                             table_cell(ui, column, row_height, from, p.muted, false);
                             icons::show(ui, Icon::ArrowRight, 16.0, p.accent);
@@ -1048,25 +995,18 @@ impl ArrayApp {
                     theme::section_title(ui, Icon::Lock, &t("Data on this PC", "البيانات على جهازك"));
                     theme::para(
                         ui,
-                        tr("Settings, the undo record and face memory are kept in:", "الإعدادات وسجل التراجع وذاكرة الوجوه محفوظة في:"),
+                        tr("Settings and the undo record are kept in:", "الإعدادات وسجل التراجع محفوظة في:"),
                         13.0,
                         pal().muted,
                         false,
                     );
                     ui.label(theme::muted(self.storage.dir().display().to_string()).small());
                     ui.add_space(8.0);
-                    theme::row(ui, |ui| {
-                        if theme::button(ui, Kind::Secondary, Some(Icon::External), tr("Open data folder", "فتح مجلد البيانات"), true).clicked() {
-                            let dir = self.storage.dir().to_path_buf();
-                            let _ = std::fs::create_dir_all(&dir);
-                            self.open_in_explorer(&dir);
-                        }
-                        let size = self.storage.face_cache_size();
-                        let label = format!("{} ({:.1} MB)", tr("Clear face memory", "مسح ذاكرة الوجوه"), size as f64 / 1_048_576.0);
-                        if theme::button(ui, Kind::Ghost, Some(Icon::Trash), &label, size > 0).clicked() {
-                            self.confirm_clear_faces = true;
-                        }
-                    });
+                    if theme::button(ui, Kind::Secondary, Some(Icon::External), tr("Open data folder", "فتح مجلد البيانات"), true).clicked() {
+                        let dir = self.storage.dir().to_path_buf();
+                        let _ = std::fs::create_dir_all(&dir);
+                        self.open_in_explorer(&dir);
+                    }
                 });
             });
         });
@@ -1085,7 +1025,7 @@ impl ArrayApp {
             ui.add_space(14.0);
             for (en, arabic) in [
                 ("Gathers scattered files and puts them in tidy folders —", "يجمع الملفات المبعثرة ويضعها في مجلدات مرتبة —"),
-                ("photos into each person's folder, recitations and songs into each artist's folder —", "الصور في مجلد كل شخص، والتلاوات والأغاني في مجلد كل قارئ وفنان —"),
+                ("recitations and songs into each artist's folder —", "التلاوات والأغاني في مجلد كل قارئ وفنان —"),
                 ("without touching what you already organized.", "دون أن يمس ما رتّبته أنت."),
             ] {
                 ui.label(t(en, arabic));
@@ -1109,7 +1049,6 @@ impl ArrayApp {
                 self.set_option(|o| o.welcome_seen = false);
             }
             ui.add_space(14.0);
-            ui.label(theme::muted(t("Face models: YuNet (MIT) and SFace (Apache 2.0) from OpenCV Zoo", "نماذج الوجوه: YuNet (MIT) وSFace (Apache 2.0) من OpenCV Zoo")).small());
         });
     }
 
@@ -1243,21 +1182,6 @@ impl ArrayApp {
                     self.start_undo(ctx);
                 }
                 Some(false) => self.confirm_undo = false,
-                None => {}
-            }
-        }
-        if self.confirm_clear_faces {
-            let body = tr("Photos will be analyzed again next time (a few minutes).", "ستُحلَّل الصور من جديد في المرة القادمة (بضع دقائق).");
-            let note = tr("Your photos are not affected.", "صورك لا تتأثر.");
-            match self.dialog(ctx, "faces", tr("Clear face memory", "مسح ذاكرة الوجوه"), body, note) {
-                Some(true) => {
-                    self.confirm_clear_faces = false;
-                    self.status_message = match self.storage.clear_face_cache() {
-                        Ok(()) => tr("Face memory cleared.", "مُسحت ذاكرة الوجوه.").to_string(),
-                        Err(err) => format!("⚠ {}", err),
-                    };
-                }
-                Some(false) => self.confirm_clear_faces = false,
                 None => {}
             }
         }

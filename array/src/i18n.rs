@@ -22,6 +22,7 @@ pub fn tr<'a>(en: &'a str, arabic: &'a str) -> &'a str {
 #[derive(Clone, Copy)]
 pub enum Noun {
     File,
+    #[allow(dead_code)] // تُستخدم في اختبارات الصيغ؛ أول عداد لها يأتي مع مجلدات السنوات
     Photo,
     Folder,
     ProtectedFolder,
