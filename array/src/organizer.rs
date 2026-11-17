@@ -979,21 +979,29 @@ impl OrganizerEngine {
     /// يعيد فقط ما نُقل فعلاً ولا يكتب فوق أي ملف.
     pub fn undo_from_journal(source_path: &Path, progress: &AtomicUsize) -> Option<RunResult> {
         let mut journal = Journal::load(source_path)?;
+        // المسارات في البيان مطلقة؛ تُعاد بناؤها نسبةً إلى المجلد الحالي فيعمل التراجع بعد نقل المجلد
+        let journaled_source = journal.source.clone();
+        let rebase = |p: &PathBuf| -> PathBuf {
+            p.strip_prefix(&journaled_source).map(|r| source_path.join(r)).unwrap_or_else(|_| p.clone())
+        };
+        // الحفظ التالي يكتب البيان في مكان المجلد الجديد لا القديم
+        journal.source = source_path.to_path_buf();
         let moves: Vec<PlannedMove> = journal
             .entries
             .iter()
             // نقل وقع بعد آخر حفظ للبيان (قبل `journal.save`) لا يزال done=false
-            .filter(|e| e.done || (e.to.exists() && !e.from.exists()))
-            .map(|e| PlannedMove { from: e.from.clone(), to: e.to.clone() })
+            .filter(|e| e.done || (rebase(&e.to).exists() && !rebase(&e.from).exists()))
+            .map(|e| PlannedMove { from: rebase(&e.from), to: rebase(&e.to) })
             .collect();
         if moves.is_empty() {
             return Some(RunResult::default());
         }
-        let result = Self::undo(&moves, source_path, &journal.created_dirs, progress);
+        let created_dirs: Vec<PathBuf> = journal.created_dirs.iter().map(&rebase).collect();
+        let result = Self::undo(&moves, source_path, &created_dirs, progress);
         // ما أُرجع يُعلَّم غير منقول، وما فشل يبقى معلَّمًا لإعادة المحاولة
-        let failed: HashSet<&PathBuf> = result.failed.iter().map(|m| &m.to).collect();
+        let failed: HashSet<PathBuf> = result.failed.iter().map(|m| m.to.clone()).collect();
         for entry in journal.entries.iter_mut().filter(|e| e.done) {
-            if !failed.contains(&entry.to) {
+            if !failed.contains(&rebase(&entry.to)) {
                 entry.done = false;
             }
         }
@@ -2038,6 +2046,27 @@ trailer
         assert!(!root.join(JOURNAL_DIR).join("history.json.tmp").exists(), "الملف المؤقت بقي بعد الحفظ");
         assert!(Journal::load(&root).is_some(), "البيان المحفوظ لا يُقرأ");
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn undo_works_after_the_organized_folder_is_moved() {
+        let root = temp_tree("journal_moved", &["1.pdf", "a/2.pdf", "clip.mp4"]);
+        let before = tree(&root);
+        let (plan, _) = organize(&root, &rebuild());
+        assert!(Journal::exists(&root));
+
+        // المستخدم نقل المجلد إلى مسار آخر بعد التنظيم
+        let moved = root.with_file_name(format!("{}_moved", root.file_name().unwrap().to_string_lossy()));
+        let _ = fs::remove_dir_all(&moved);
+        fs::rename(&root, &moved).unwrap();
+
+        let undone = OrganizerEngine::undo_from_journal(&moved, &AtomicUsize::new(0)).unwrap();
+
+        assert!(undone.failed.is_empty(), "{:?}", undone.failed);
+        assert_eq!(undone.done.len(), plan.moves.len());
+        assert_eq!(tree(&moved), before);
+        assert!(!root.exists(), "البيان أُعيد إنشاء المسار القديم");
+        fs::remove_dir_all(&moved).unwrap();
     }
 
     #[test]
