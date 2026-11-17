@@ -44,7 +44,7 @@ const CATEGORY_FOLDERS: [(&str, &str); 7] = [
 const YEAR_SPLIT_LIMIT: usize = 500;
 
 /// مجلد النسخ المكررة للمراجعة: لا حذف أبداً، والتراجع يعيدها
-const DUPLICATES_FOLDER: &str = "مكررات للمراجعة";
+pub const DUPLICATES_FOLDER: &str = "مكررات للمراجعة";
 
 /// ملفات ترافق ملفاً رئيسياً: الترجمة مع الفيديو، وبيانات التعديل مع الصورة
 const COMPANION_EXTENSIONS: [&str; 5] = ["srt", "ass", "vtt", "xmp", "aae"];
@@ -84,6 +84,16 @@ pub struct Options {
     pub rename_recordings: bool,
     /// مجموعة «مستندات لها عنوان داخلي»
     pub rename_documents_by_title: bool,
+    /// مفاتيح الفئات: إيقاف فئة يترك ملفاتها في مكانها
+    pub organize_pictures: bool,
+    pub organize_videos: bool,
+    pub organize_audio: bool,
+    pub organize_documents: bool,
+    pub organize_archives: bool,
+    pub organize_installers: bool,
+    pub organize_recordings: bool,
+    /// نقل النسخ المكررة إلى «مكررات للمراجعة»
+    pub move_duplicates: bool,
 }
 
 impl Default for Options {
@@ -103,13 +113,61 @@ impl Default for Options {
             rename_camera_names: true,
             rename_recordings: true,
             rename_documents_by_title: true,
+            organize_pictures: true,
+            organize_videos: true,
+            organize_audio: true,
+            organize_documents: true,
+            organize_archives: true,
+            organize_installers: true,
+            organize_recordings: true,
+            move_duplicates: true,
         }
     }
 }
 
 impl Options {
+    /// هل فئة الملفات هذه مفعّلة؟
+    pub fn category_enabled(&self, category: &str) -> bool {
+        match category {
+            "Pictures" => self.organize_pictures,
+            "Videos" => self.organize_videos,
+            "Music" => self.organize_audio,
+            "Documents" => self.organize_documents,
+            "Archives" => self.organize_archives,
+            "Installers" => self.organize_installers,
+            "Recordings" => self.organize_recordings,
+            _ => true,
+        }
+    }
+
+    /// تعيين فئة من بطاقة الملخص
+    pub fn set_category(&mut self, category: &str, on: bool) {
+        match category {
+            "Pictures" => self.organize_pictures = on,
+            "Videos" => self.organize_videos = on,
+            "Music" => self.organize_audio = on,
+            "Documents" => self.organize_documents = on,
+            "Archives" => self.organize_archives = on,
+            "Installers" => self.organize_installers = on,
+            "Recordings" => self.organize_recordings = on,
+            _ => {}
+        }
+    }
+
+    /// تعيين مجموعة تسمية من بطاقة الملخص
+    pub fn set_naming_group(&mut self, group: NamingGroup, on: bool) {
+        match group {
+            NamingGroup::Junk => self.rename_junk_names = on,
+            NamingGroup::Whatsapp => self.rename_whatsapp_media = on,
+            NamingGroup::Screenshot => self.rename_screenshots = on,
+            NamingGroup::Camera => self.rename_camera_names = on,
+            NamingGroup::Recording => self.rename_recordings = on,
+            NamingGroup::Document => self.rename_documents_by_title = on,
+        }
+    }
+
     /// هل مجموعة التسمية هذه مفعّلة؟
-    fn naming_enabled(&self, group: NamingGroup) -> bool {
+    pub fn naming_enabled(&self, group: NamingGroup) -> bool {
         match group {
             NamingGroup::Junk => self.rename_junk_names,
             NamingGroup::Whatsapp => self.rename_whatsapp_media,
@@ -184,6 +242,21 @@ impl Journal {
     }
 }
 
+/// بطاقة في ملخص ما قبل التنفيذ: عدد + أمثلة «قبل ← بعد»
+#[derive(Clone, Debug, Default)]
+pub struct Summary {
+    pub count: usize,
+    /// أول خمسة أمثلة: (اسم الملف القديم، المسار الجديد نسبةً إلى المجلد المختار)
+    pub examples: Vec<(String, String)>,
+}
+
+/// لماذا بقي ملف في مكانه
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeftReason {
+    /// فئته موقوفة من المفاتيح
+    CategoryOff,
+}
+
 /// خطة التنظيم الكاملة قبل نقل أي ملف (تُعرض للمعاينة ثم تُنفَّذ)
 pub struct Plan {
     pub source: PathBuf,
@@ -196,6 +269,12 @@ pub struct Plan {
     pub kept_in_folders: usize,
     /// عدد النسخ المكررة التي ستُنقل إلى «مكررات للمراجعة»
     pub duplicates: usize,
+    /// ملخص كل فئة (المفتاح الداخلي: Pictures، Videos…)
+    pub categories: Vec<(&'static str, Summary)>,
+    /// ملخص كل مجموعة تسمية
+    pub naming_groups: Vec<(NamingGroup, Summary)>,
+    /// ملفات تُركت في مكانها مع السبب
+    pub left: Vec<(PathBuf, LeftReason)>,
     /// مجلدات برامج أو مشاريع لم يُلمس أي شيء داخلها، مع السبب
     pub skipped: Vec<(PathBuf, String)>,
 }
@@ -475,6 +554,7 @@ impl OrganizerEngine {
         let keywords: Vec<String> = options.speaker_keywords.iter().map(|k| Self::group_key(k.trim())).collect();
 
         let (all_files, skipped) = Self::collect_files(source_path);
+        let mut left: Vec<(PathBuf, LeftReason)> = Vec::new();
         // المرافق (ترجمة/بيانات تعديل/فيديو صورة حية) يُنقل مع رئيسيه لا وحده
         let (files, companions) = Self::split_packages(&all_files);
         let category_dirs = Self::category_dirs(source_path);
@@ -513,6 +593,11 @@ impl OrganizerEngine {
                     (category, Self::clean_string(&stem), None, None)
                 }
             };
+            // فئة موقوفة: ملفاتها تبقى في مكانها مع السبب
+            if !options.category_enabled(category) {
+                left.push((path.clone(), LeftReason::CategoryOff));
+                continue;
+            }
             // بدون إعادة تسمية يبقى الاسم والامتداد كما هما تماماً
             let (new_stem, extension) = if options.rename_files {
                 (clean_name, ext.to_lowercase())
@@ -561,6 +646,11 @@ impl OrganizerEngine {
             // مجلدات أنشأتها نسخ قديمة من البرنامج ليست تنظيماً للمستخدم
             inside_subfolder && !matches!(first.as_deref(), Some("single tracks" | "unknown" | "array_organized"))
         };
+        // معلومات كل ملف (فئة ومجموعة تسمية) لبناء بطاقات الملخص بعد حساب النقل
+        let info_by_path: HashMap<PathBuf, (String, Option<NamingGroup>)> = raw_files
+            .iter()
+            .map(|f| (f.path.clone(), (f.category.clone(), f.naming_group)))
+            .collect();
         let (raw_files, kept_files): (Vec<RawFileInfo>, Vec<RawFileInfo>) =
             raw_files.into_iter().partition(|f| !(options.keep_existing_folders && kept(&f.path)));
         let kept_in_folders = kept_files.len();
@@ -624,7 +714,7 @@ impl OrganizerEngine {
             })
             .collect();
 
-        let (mut moves, in_place, finals, duplicates) = Self::plan_moves(targeted, source_path);
+        let (mut moves, in_place, finals, duplicates) = Self::plan_moves(targeted, source_path, options.move_duplicates);
         // المرافق يتبع رئيسيه: نفس المجلد ونفس الاسم الجديد
         let mut reserved: HashSet<String> = moves.iter().map(|m| m.to.to_string_lossy().to_lowercase()).collect();
         for (companion, master) in companions {
@@ -651,6 +741,56 @@ impl OrganizerEngine {
         }
         new_dirs.sort();
 
+        // ملخص البطاقات: عدد وأمثلة «قبل ← بعد» لكل فئة ولكل مجموعة تسمية
+        let mut categories: Vec<(&'static str, Summary)> = Vec::new();
+        let mut naming_groups: Vec<(NamingGroup, Summary)> = Vec::new();
+        for m in &moves {
+            let Some(info) = info_by_path.get(&m.from) else { continue };
+            let example = (
+                m.from.file_name().unwrap_or_default().to_string_lossy().to_string(),
+                m.to.strip_prefix(source_path).unwrap_or(&m.to).display().to_string(),
+            );
+            let key = match info.0.as_str() {
+                "Pictures" => "Pictures",
+                "Videos" => "Videos",
+                "Music" => "Music",
+                "Documents" => "Documents",
+                "Archives" => "Archives",
+                "Installers" => "Installers",
+                "Recordings" => "Recordings",
+                _ => "Other",
+            };
+            let entry = match categories.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, summary)) => summary,
+                None => {
+                    categories.push((key, Summary::default()));
+                    &mut categories.last_mut().unwrap().1
+                }
+            };
+            entry.count += 1;
+            if entry.examples.len() < 5 {
+                entry.examples.push(example.clone());
+            }
+            if let Some(group) = info.1 {
+                let group_entry = match naming_groups.iter_mut().find(|(g, _)| *g == group) {
+                    Some((_, summary)) => summary,
+                    None => {
+                        naming_groups.push((group, Summary::default()));
+                        &mut naming_groups.last_mut().unwrap().1
+                    }
+                };
+                group_entry.count += 1;
+                if group_entry.examples.len() < 5 {
+                    group_entry.examples.push(example);
+                }
+            }
+        }
+
+        // ترتيب ثابت للبطاقات كما في الواجهة
+        let order = ["Pictures", "Videos", "Music", "Documents", "Archives", "Installers", "Recordings"];
+        categories.sort_by_key(|(k, _)| order.iter().position(|o| o == k).unwrap_or(order.len()));
+        naming_groups.sort_by_key(|(g, _)| format!("{g:?}"));
+
         Ok(Plan {
             source: source_path.to_path_buf(),
             moves,
@@ -658,6 +798,9 @@ impl OrganizerEngine {
             in_place,
             kept_in_folders,
             duplicates,
+            categories,
+            naming_groups,
+            left,
             skipped,
         })
     }
@@ -960,8 +1103,12 @@ impl OrganizerEngine {
 
     /// يرجع (عمليات النقل، عدد الملفات الموجودة أصلاً في مكانها الصحيح، مكان كل ملف بعد التنفيذ،
     /// عدد المكررات التي أُرسلت للمراجعة)
-    fn plan_moves(mut files: Vec<(RawFileInfo, PathBuf)>, source_path: &Path) -> (Vec<PlannedMove>, usize, HashMap<PathBuf, PathBuf>, usize) {
-        let duplicates = Self::redirect_duplicates(&mut files, source_path);
+    fn plan_moves(
+        mut files: Vec<(RawFileInfo, PathBuf)>,
+        source_path: &Path,
+        move_duplicates: bool,
+    ) -> (Vec<PlannedMove>, usize, HashMap<PathBuf, PathBuf>, usize) {
+        let duplicates = if move_duplicates { Self::redirect_duplicates(&mut files, source_path) } else { 0 };
         // أسماء محجوزة داخل الخطة نفسها (بأحرف صغيرة لأن أسماء ويندوز لا تفرّق بين الحالة)
         let mut reserved: HashSet<String> = HashSet::new();
         let mut moves = Vec::new();
@@ -1810,6 +1957,63 @@ trailer
     }
 
     #[test]
+    fn a_disabled_category_leaves_its_files_alone_with_a_reason() {
+        let root = temp_tree("category_off", &["clip.mp4", "photo.jpg", "doc.pdf"]);
+        let mut options = rebuild();
+        options.organize_videos = false;
+
+        let (plan, result) = organize(&root, &options);
+
+        assert!(result.failed.is_empty());
+        let files = tree(&root);
+        assert!(files.contains(&"clip.mp4".to_string()), "{files:?}");
+        assert_eq!(plan.left.len(), 1);
+        assert_eq!(plan.left[0].1, LeftReason::CategoryOff);
+        assert_eq!(plan.categories.iter().map(|(k, _)| *k).collect::<Vec<_>>(), vec!["Pictures", "Documents"]);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_summary_has_a_count_and_at_most_five_examples_per_card() {
+        let root = temp_tree("summary", &[]);
+        for i in 0..7 {
+            fs::write(root.join(format!("IMG_000{i}.jpg")), b"x").unwrap();
+        }
+        fs::write(root.join("song.mp3"), b"y").unwrap();
+
+        let (plan, _) = organize(&root, &rebuild());
+
+        let (key, pictures) = plan.categories.iter().find(|(k, _)| *k == "Pictures").unwrap();
+        assert_eq!(*key, "Pictures");
+        assert_eq!(pictures.count, 7);
+        assert_eq!(pictures.examples.len(), 5);
+        // مثال واحد على الأقل يقود إلى مجلد الصور وبامتداد محفوظ
+        let (old, new) = &pictures.examples[0];
+        assert!(old.ends_with(".jpg"), "{old}");
+        assert!(new.starts_with("صور\\"), "{new}");
+        // مجموعة الكاميرا (IMG_####) لها بطاقة بعددها
+        let camera = plan.naming_groups.iter().find(|(g, _)| *g == NamingGroup::Camera);
+        assert_eq!(camera.map(|(_, s)| s.count), Some(7), "{:?}", plan.naming_groups);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn duplicates_stay_put_when_the_switch_is_off() {
+        let root = temp_tree("dups_off", &["a.txt", "b.txt"]);
+        fs::write(root.join("a.txt"), b"same").unwrap();
+        fs::write(root.join("b.txt"), b"same").unwrap();
+        let mut options = rebuild();
+        options.move_duplicates = false;
+
+        let (plan, _) = organize(&root, &options);
+
+        assert_eq!(plan.duplicates, 0);
+        let files = tree(&root);
+        assert!(!files.iter().any(|f| f.starts_with("مكررات للمراجعة/")), "{files:?}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn a_same_size_stranger_does_not_hide_duplicates() {
         // ملف بنفس حجم نسختين متطابقتين لكن محتواه مختلف: يجب ألا يكسر الكشف
         let root = temp_tree("dups_mixed", &[]);
@@ -1871,6 +2075,9 @@ trailer
             in_place: 0,
             kept_in_folders: 0,
             duplicates: 0,
+            categories: Vec::new(),
+            naming_groups: Vec::new(),
+            left: Vec::new(),
             skipped: Vec::new(),
         };
         OrganizerEngine::execute(&partial, &AtomicUsize::new(0));

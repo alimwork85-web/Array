@@ -17,7 +17,8 @@ use eframe::egui::{self, RichText};
 
 use i18n::{ar, count, tr, Noun};
 use icons::Icon;
-use organizer::{Journal, Options, OrganizerEngine, Plan};
+use organizer::{Journal, Options, OrganizerEngine, Plan, Summary};
+use naming::NamingGroup;
 use safety::SafetyChecker;
 use rfd::FileDialog;
 use std::collections::{BTreeMap, BTreeSet};
@@ -113,6 +114,15 @@ fn poll<T>(rx: &Receiver<Result<T, String>>) -> Option<Result<T, String>> {
 const THIS_FOLDER: &str = "\u{1}this-folder";
 
 /// خطة جاهزة للعرض. النصوص تُحفظ بترتيبها المنطقي وتُجهّز للرسم عند العرض
+/// ما تعرضه شاشة النتيجة: نُقل، أُعيد تسميته، مكررات، وتُرك مع السبب
+#[derive(Clone, Copy, Default)]
+struct RunStats {
+    moved: usize,
+    renamed: usize,
+    duplicates: usize,
+    left: usize,
+}
+
 struct Preview {
     plan: Plan,
     /// (اسم المجلد، عدد الملفات، موجود أم جديد، عدد مجلدات الفنانين)
@@ -202,6 +212,10 @@ struct ArrayApp {
     undo_source: Option<PathBuf>,
     confirm_undo: bool,
     show_skipped: bool,
+    /// الجدول التفصيلي بدل بطاقات الملخص
+    show_all: bool,
+    /// إحصاءات آخر تنفيذ (شاشة النتيجة)
+    last_stats: Option<RunStats>,
     /// السمة المطبّقة حالياً (None قبل أول إطار)
     dark: Option<bool>,
 }
@@ -234,6 +248,8 @@ impl ArrayApp {
             undo_source: None,
             confirm_undo: false,
             show_skipped: false,
+            show_all: false,
+            last_stats: None,
             dark: None,
         };
         app.refresh_undo();
@@ -318,6 +334,7 @@ impl ArrayApp {
                 Some(Ok(plan)) => {
                     self.status_message = tr("Review where each file will go, then confirm.", "راجع إلى أين سيذهب كل ملف، ثم أكّد.").to_string();
                     self.show_skipped = false;
+                    self.show_all = false;
                     self.preview = Some(Preview::new(plan));
                 }
                 Some(Err(err)) => {
@@ -372,6 +389,18 @@ impl ArrayApp {
     }
 
     fn start_organizing(&mut self, ctx: &egui::Context, plan: Plan) {
+        // الإحصاءات من الخطة نفسها قبل نقل أي ملف
+        let mut stats = RunStats { duplicates: plan.duplicates, left: plan.left.len(), ..RunStats::default() };
+        for m in &plan.moves {
+            // الملف قد يُنقل ويُعاد تسميته في العملية نفسها، فيُحسب في الاثنين
+            if m.from.parent() != m.to.parent() {
+                stats.moved += 1;
+            }
+            if m.from.file_name() != m.to.file_name() {
+                stats.renamed += 1;
+            }
+        }
+        self.last_stats = Some(stats);
         let progress = Arc::new(AtomicUsize::new(0));
         let total = plan.moves.len();
         let folder = plan.source.clone();
@@ -459,6 +488,7 @@ impl ArrayApp {
             }
             Ok(msg)
         });
+        self.last_stats = None;
         self.job = Some(Job::Moving { restoring: true, rx, progress, total, folder: job_folder });
         self.page = Page::Organize;
         self.status_message = format!("⏳ {}", tr("Restoring files… please wait", "جارٍ إعادة الملفات… لحظات"));
@@ -742,6 +772,23 @@ impl ArrayApp {
             if outcome.folder.exists() {
                 ui.label(theme::muted(rtl::for_display(&outcome.folder.display().to_string())).small());
             }
+            if let Some(stats) = self.last_stats {
+                ui.add_space(8.0);
+                theme::row(ui, |ui| {
+                    let width = ((ui.available_width() - 3.0 * 30.0 - 2.0 * 10.0) / 3.0).max(90.0);
+                    theme::stat(ui, width, Icon::ArrowRight, stats.moved, tr("moved", "نُقل"), p.accent);
+                    theme::stat(ui, width, Icon::Edit, stats.renamed, tr("renamed", "أُعيد تسميته"), p.text);
+                    theme::stat(ui, width, Icon::Document, stats.duplicates, tr("to the review folder", "إلى المكررات"), p.muted);
+                });
+                if stats.left > 0 {
+                    let note = format!(
+                        "{} {}",
+                        count(stats.left, Noun::File),
+                        tr("stayed: their category is switched off.", "بقيت: فئتها موقوفة.")
+                    );
+                    ui.label(theme::muted(rtl::for_display(&note)));
+                }
+            }
             for line in outcome.message.lines().skip(1) {
                 let line = line.trim_start_matches(['✔', '↩', '⚠', '❌']).trim_start();
                 theme::row(ui, |ui| {
@@ -903,6 +950,23 @@ impl ArrayApp {
         }
         ui.add_space(10.0);
 
+        // ملخص: بطاقة لكل فئة ولكل مجموعة تسمية وللمكررات
+        if !preview.plan.left.is_empty() {
+            let note = format!(
+                "{} {}",
+                count(preview.plan.left.len(), Noun::File),
+                tr("stay where they are: their category is switched off.", "تبقى في مكانها: فئتها موقوفة.")
+            );
+            ui.label(theme::muted(rtl::for_display(&note)));
+            ui.add_space(6.0);
+        }
+        let (show_all, toggled) = if self.show_all { (false, None) } else { summary_cards(ui, &preview.plan, &self.options) };
+        if show_all {
+            self.show_all = true;
+        }
+        ui.add_space(8.0);
+
+        if self.show_all {
         // الجدول
         let row_height = ui.text_style_height(&egui::TextStyle::Body) + 12.0;
         let table_height = (ui.available_height() - 100.0).max(row_height * 4.0);
@@ -934,6 +998,7 @@ impl ArrayApp {
         });
         ui.add_space(12.0);
 
+        }
         theme::row(ui, |ui| {
             let label = format!("{} {}", tr("Organize", "رتّب"), count(preview.rows.len(), Noun::File));
             if theme::button(ui, Kind::Primary, Some(Icon::Check), &label, true).clicked() {
@@ -942,10 +1007,30 @@ impl ArrayApp {
             if theme::button(ui, Kind::Secondary, Some(Icon::Close), tr("Cancel", "إلغاء"), true).clicked() {
                 decision = Some(false);
             }
+            let view_label = if self.show_all { tr("Summary", "الملخص") } else { tr("Show all", "عرض الكل") };
+            if theme::button(ui, Kind::Ghost, Some(Icon::History), view_label, true).clicked() {
+                self.show_all = !self.show_all;
+            }
         });
 
         if toggle_skipped {
             self.show_skipped = !self.show_skipped;
+        }
+        // مفتاح تغيّر من بطاقة: يُحفظ ويُعاد حساب الخطة قبل أي تنفيذ
+        if let Some((kind, on)) = toggled {
+            match kind {
+                CardKind::Category(key) => self.options.set_category(key, on),
+                CardKind::Naming(group) => self.options.set_naming_group(group, on),
+                CardKind::Duplicates => self.options.move_duplicates = on,
+            }
+            if let Err(err) = self.storage.save_settings(&self.options) {
+                self.status_message = format!("⚠ {err}");
+            }
+            if let Some(path) = self.selected_path.clone() {
+                self.preview = None;
+                self.start_planning(ctx, path);
+            }
+            return;
         }
         match decision {
             Some(true) => {
@@ -1260,6 +1345,158 @@ impl ArrayApp {
 }
 
 /// أيقونة مجلد الوجهة في المعاينة حسب نوعه
+/// مفتاح بطاقة في الملخص
+#[derive(Clone, Copy)]
+enum CardKind {
+    Category(&'static str),
+    Naming(NamingGroup),
+    Duplicates,
+}
+
+struct CardInput {
+    icon: Icon,
+    title: String,
+    summary: Summary,
+    enabled: bool,
+    kind: CardKind,
+}
+
+/// بطاقات الملخص: العدد، وخمسة أمثلة «قبل ← بعد»، ومفتاح، وزر عرض الكل.
+/// تُرجع (هل ضُغط «عرض الكل»؟، وأي مفتاح تغيّر إلى أي حالة)
+fn summary_cards(ui: &mut egui::Ui, plan: &Plan, options: &Options) -> (bool, Option<(CardKind, bool)>) {
+    let p = pal();
+    let mut cards: Vec<CardInput> = Vec::new();
+    for (key, summary) in &plan.categories {
+        cards.push(CardInput {
+            icon: category_key_icon(key),
+            title: category_title(key),
+            summary: summary.clone(),
+            enabled: options.category_enabled(key),
+            kind: CardKind::Category(key),
+        });
+    }
+    for (group, summary) in &plan.naming_groups {
+        let (icon, title) = naming_group_card(*group);
+        cards.push(CardInput {
+            icon,
+            title,
+            summary: summary.clone(),
+            enabled: options.naming_enabled(*group),
+            kind: CardKind::Naming(*group),
+        });
+    }
+    if plan.duplicates > 0 {
+        let review = plan.source.join(organizer::DUPLICATES_FOLDER);
+        let examples = plan
+            .moves
+            .iter()
+            .filter(|m| m.to.starts_with(&review))
+            .take(5)
+            .map(|m| {
+                (
+                    m.from.file_name().unwrap_or_default().to_string_lossy().to_string(),
+                    m.to.strip_prefix(&plan.source).unwrap_or(&m.to).display().to_string(),
+                )
+            })
+            .collect();
+        cards.push(CardInput {
+            icon: Icon::Document,
+            title: tr("Duplicates", "المكررات").to_string(),
+            summary: Summary { count: plan.duplicates, examples },
+            enabled: options.move_duplicates,
+            kind: CardKind::Duplicates,
+        });
+    }
+
+    let mut show_all = false;
+    let mut toggled: Option<(CardKind, bool)> = None;
+    let width = ((ui.available_width() - 70.0) / 2.0).max(230.0);
+    {
+        {
+            for pair in cards.chunks(2) {
+                theme::row(ui, |ui| {
+                    for card in pair {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(width, 0.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                theme::card(ui, |ui| {
+                                    ui.set_width((width - 30.0).max(180.0));
+                                    theme::row(ui, |ui| {
+                                        icons::show(ui, card.icon, 18.0, p.accent);
+                                        ui.label(theme::strong(rtl::for_display(&card.title), 15.0));
+                                        ui.label(theme::strong(card.summary.count.to_string(), 15.0).color(p.accent));
+                                    });
+                                    ui.add_space(6.0);
+                                    for (old, new) in &card.summary.examples {
+                                        let line = format!("{old}  ←  {new}");
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(rtl::for_display(&line)).small().color(p.muted),
+                                            )
+                                            .truncate(true),
+                                        );
+                                    }
+                                    ui.add_space(8.0);
+                                    let mut on = card.enabled;
+                                    let state = if on { tr("Included", "مشمول") } else { tr("Skipped", "مستثنى") };
+                                    if theme::toggle_row(ui, true, &mut on, state, "") {
+                                        toggled = Some((card.kind, on));
+                                    }
+                                    ui.add_space(4.0);
+                                    if theme::button(ui, Kind::Ghost, Some(Icon::ArrowRight), tr("Show all", "عرض الكل"), true).clicked() {
+                                        show_all = true;
+                                    }
+                                });
+                            },
+                        );
+                        ui.add_space(18.0);
+                    }
+                });
+                ui.add_space(10.0);
+            }
+        }
+    }
+    (show_all, toggled)
+}
+
+fn category_key_icon(key: &str) -> Icon {
+    match key {
+        "Pictures" => Icon::Photo,
+        "Videos" => Icon::Video,
+        "Music" => Icon::Music,
+        "Documents" => Icon::Document,
+        "Archives" => Icon::Archive,
+        "Installers" => Icon::Organize,
+        "Recordings" => Icon::Clock,
+        _ => Icon::Folder,
+    }
+}
+
+fn category_title(key: &str) -> String {
+    match key {
+        "Pictures" => tr("Pictures", "الصور").to_string(),
+        "Videos" => tr("Videos", "الفيديو").to_string(),
+        "Music" => tr("Audio", "الصوتيات").to_string(),
+        "Documents" => tr("Documents", "المستندات").to_string(),
+        "Archives" => tr("Archives", "المضغوطات").to_string(),
+        "Installers" => tr("Installers", "المثبّتات").to_string(),
+        "Recordings" => tr("Recordings", "التسجيلات").to_string(),
+        _ => tr("Other", "أخرى").to_string(),
+    }
+}
+
+fn naming_group_card(group: NamingGroup) -> (Icon, String) {
+    match group {
+        NamingGroup::Junk => (Icon::Edit, tr("Vague names", "أسماء رديئة").to_string()),
+        NamingGroup::Whatsapp => (Icon::Photo, tr("WhatsApp media", "وسائط واتساب").to_string()),
+        NamingGroup::Screenshot => (Icon::Photo, tr("Screenshots", "لقطات الشاشة").to_string()),
+        NamingGroup::Camera => (Icon::Photo, tr("Camera names", "أسماء الكاميرا").to_string()),
+        NamingGroup::Recording => (Icon::Music, tr("Recordings", "تسجيلات صوتية").to_string()),
+        NamingGroup::Document => (Icon::Document, tr("Document titles", "عناوين المستندات").to_string()),
+    }
+}
+
 fn category_icon(folder: &str) -> Icon {
     let lower = normalizer::normalize_arabic(&folder.to_lowercase());
     let has = |words: &[&str]| words.iter().any(|w| lower.contains(w));
