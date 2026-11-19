@@ -1446,15 +1446,23 @@ impl ArrayApp {
             return;
         }
         self.review_scan = None;
-        self.status_message = match OrganizerEngine::trash_files(&scan.movable) {
-            Ok(n) => {
+        let (moved, error) = OrganizerEngine::trash_files(&scan.movable);
+        self.status_message = match (moved, error) {
+            (n, None) => {
                 if ar() {
                     format!("نُقل {n} إلى سلة المحذوفات — يمكنك استرجاعها من السلة.")
                 } else {
                     format!("{n} moved to the Recycle Bin — you can restore them from there.")
                 }
             }
-            Err(err) => format!("⚠ {err}"),
+            (0, Some(err)) => format!("⚠ {err}"),
+            (n, Some(err)) => {
+                if ar() {
+                    format!("نُقل {n} إلى السلة، وفشل الباقي: {err}")
+                } else {
+                    format!("Moved {n} to the Recycle Bin; the rest failed: {err}")
+                }
+            }
         };
     }
 }

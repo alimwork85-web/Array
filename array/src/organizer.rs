@@ -501,13 +501,19 @@ impl OrganizerEngine {
     }
 
     /// نقل الملفات إلى سلة المحذوفات (قابلة للاسترجاع). لا حذف نهائي في البرنامج.
-    pub fn trash_files(files: &[PathBuf]) -> Result<usize, String> {
+    /// يرجع (عدد ما نُقل، أول خطأ): الفشل لا يُسقط عدّاد ما نُقل قبله ولا يوقف بقية الدفعة.
+    pub fn trash_files(files: &[PathBuf]) -> (usize, Option<String>) {
         let mut moved = 0;
+        let mut first_error = None;
         for file in files {
-            trash::delete(file).map_err(|e| format!("{} — {e}", file.display()))?;
-            moved += 1;
+            match trash::delete(file) {
+                Ok(()) => moved += 1,
+                Err(e) => {
+                    first_error.get_or_insert(format!("{} — {e}", file.display()));
+                }
+            }
         }
-        Ok(moved)
+        (moved, first_error)
     }
 
     fn move_file(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -2801,5 +2807,21 @@ trailer
         }
 
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// فشل السلة يُبلَّغ عنه ولا يمنع الدفعة: المسارات المفقودة تُرجع صفرًا مع خطأ،
+    /// ولا تُسقط عدّاد ما نُقل قبلها (السلوك الجزئي تحقق منه بتجربة مؤقتة في تقرير fix-8)
+    #[test]
+    fn trash_files_reports_the_error_and_keeps_counting() {
+        let dir = std::env::temp_dir().join(format!("array_trash_count_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("not-there.txt");
+
+        let (moved, error) = OrganizerEngine::trash_files(&[missing.clone(), missing]);
+
+        assert_eq!(moved, 0);
+        assert!(error.is_some_and(|e| e.contains("not-there.txt")));
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
