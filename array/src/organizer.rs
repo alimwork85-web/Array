@@ -2326,6 +2326,26 @@ trailer
         fs::remove_dir_all(&parent).unwrap();
     }
 
+    /// مجلد المراجعة ليس مجلد فنان: ملفات صوت مكررة فيه تُعامل ملفات عادية،
+    /// ولا يُنشأ مجلد مراجعة ثانٍ داخل مجلد الصوتيات.
+    #[test]
+    fn the_review_folder_is_not_used_as_a_music_folder() {
+        let parent = temp_tree("review_music", &[]);
+        let root = parent.join("مكتبتي");
+        fs::create_dir_all(root.join(JOURNAL_DIR)).unwrap();
+        let review = root.join(DUPLICATES_FOLDER);
+        fs::create_dir_all(&review).unwrap();
+        fs::write(review.join("Cut T2.mp3"), b"cluster").unwrap();
+        fs::write(review.join("Cut T2 (1).mp3"), b"cluster").unwrap();
+
+        organize(&root, &Options::default());
+
+        let files = tree(&root);
+        assert!(!files.iter().any(|f| f.contains(DUPLICATES_FOLDER)), "{files:?}");
+        assert_eq!(files.iter().filter(|f| f.starts_with(&format!("صوتيات/{}/", "منوعات"))).count(), 2, "{files:?}");
+        fs::remove_dir_all(&parent).unwrap();
+    }
+
     /// الإصلاح 5: لا يُعرض للنقل إلى السلة إلا ملف له توأم مطابق بايتًا ببايت خارج المراجعة.
     #[test]
     fn only_duplicates_with_a_twin_outside_are_offered_for_the_bin() {

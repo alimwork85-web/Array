@@ -225,7 +225,10 @@ pub(crate) fn contains_marker(text: &str, markers: &[String]) -> bool {
 fn folder_kind(name: &str) -> (bool, bool) {
     let key = person_key(name);
     let lower = name.trim().to_lowercase();
-    let is_misc = MISC_SYNONYMS.iter().any(|m| person_key(m) == key) || OLD_MISC.contains(&lower.as_str());
+    let is_misc = MISC_SYNONYMS.iter().any(|m| person_key(m) == key)
+        || OLD_MISC.contains(&lower.as_str())
+        // مجلد المراجعة أنشأه البرنامج: ليس مجلد فنان ولا دليل تجميع
+        || name.trim() == crate::organizer::DUPLICATES_FOLDER;
     let is_ai = person_key(AI_FOLDER) == key;
     (is_misc, is_ai)
 }
