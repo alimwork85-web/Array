@@ -2,12 +2,12 @@
 
 > اقرأ هذا الملف أولًا، ثم `AGENTS.md`. المراحل كلها منجزة وقائمة إصلاحات المراجعة نُفِّذت؛ المتبقي قائمة مؤجَّلة في آخر الملف.
 
-## أين نحن (بعد إصدار 2.1.5)
+## أين نحن (بعد إصدار 2.1.6)
 - المشروع: `C:\Users\suailali\Desktop\المستودع\Array` (Rust + egui، الكود في `array/`).
 - الفرع: **`main`**، الشجرة نظيفة، مرفوع إلى `github.com/alimwork85-web/Array` (مستودع **عام**).
-- الإصدار الحالي **2.1.5** منشور: Release `v2.1.5` ومعه `Array-2.1.5.exe` مبنية على GitHub Actions.
-- الـEXE المحلي: `C:\Users\suailali\Desktop\المستودع\Array-2.1.5.exe` + اختصاران (`Desktop\Array.lnk`، `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Array.lnk`) يشيران إليه.
-- البوابة الخضراء: `cargo test` = **131 ناجح / 0 فاشل / 1 متجاهَل**، `cargo build --release` = **0 تحذير**، EXE ≈ 12.29 MB.
+- الإصدار الحالي **2.1.6** منشور: Release `v2.1.6` ومعه `Array-2.1.6.exe` مبنية على GitHub Actions.
+- الـEXE المحلي: `C:\Users\suailali\Desktop\المستودع\Array-2.1.6.exe` + اختصاران (`Desktop\Array.lnk`، `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Array.lnk`) يشيران إليه.
+- البوابة الخضراء: `cargo test` = **133 ناجح / 0 فاشل / 1 متجاهَل**، `cargo build --release` = **0 تحذير**، EXE ≈ 12.29 MB.
 - المراحل المنجزة: 0، 1-أ، 2، 1، 3، 5، 4 — كل واحدة بتقريرها في `REPORTS/phase-*.md`. فروع `plan/phase-*` حُذفت بعد الدمج.
 
 ## إصلاحات المراجعة — منجزة (2.1.1 و2.1.2)
@@ -32,6 +32,8 @@
 
 **2.1.5 — فحص مجلد المراجعة ونقل السلة خارج خيط الواجهة (fix-9):** `request_review_scan`/`poll_review_scan`، ونقل المكررات `Job::Trashing` يفحص وينقل في الخلفية. التفاصيل في `REPORTS/fix-9.md`.
 
+**2.1.6 — مجموعة ذهبية للأسماء وإصلاحان صغيران:** اختبار `golden_naming_set_is_unchanged` يثبّت 88 اسمًا مموّهًا (`REPORTS/naming-golden.md`)؛ اسم «تسجيل صوتي - التاريخ - المدة» يُعامل تسجيلًا (`naming.rs`)؛ صور غلاف الألبوم من ويندوز (`Folder.jpg`، `AlbumArtSmall.jpg`، `AlbumArt_{GUID}_*.jpg`) تُتخطى بالاسم حتى لو فقدت صفة الإخفاء (`SafetyChecker::is_album_art`).
+
 ## مؤجَّل بوعي (لا تفتحه بلا طلب من علي)
 - **سباق `dst.exists()` ثم `fs::rename`** في `organizer::move_file`: **نصفه أُغلق** — مسار النسخ الاحتياطي صار `copy_new` (create_new) فلا يستبدل ملفًا ظهر في الأثناء (`copying_never_overwrites_a_file_that_appeared_at_the_target`). المتبقي: `fs::rename` نفسه ما زال يستبدل في سباق أضيق جدًا، ويحتاج `MoveFileExW` بلا `REPLACE_EXISTING` عبر FFI — مؤجَّل بلا طلب من علي.
 - **إعادة بناء المسارات بعد نقلة واحدة فقط**: نقل المجلد مرتين متتاليتين يجعل `strip_prefix` بالمسار الأقدم يفشل. الحل: تُحفظ المدخلات في البيان نسبةً إلى `source`.
@@ -50,7 +52,7 @@
 - للإصدار: مهارة `array-file-organizer` فيها الخطوات الكاملة (bump، build.rs، Actions، الاختصارات، التحقق).
 
 ## أرقام سريعة
-- الاختبارات: 131/0/1. البناء النظيف: 0 تحذير. حجم الـEXE: 12.29 MB.
+- الاختبارات: 133/0/1. البناء النظيف: 0 تحذير. حجم الـEXE: 12.29 MB.
 - مجلدات العينات المؤقتة: `%LOCALAPPDATA%\Temp\array-phase1…5` (يمكن حذفها).
 - `array/target` = عدة غيغابايت، حذفه آمن وغير مأمور.
 - مهارة المشروع: `array-file-organizer` (اقرأها قبل أي عمل على Array).
