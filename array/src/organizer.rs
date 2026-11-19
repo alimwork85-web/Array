@@ -672,7 +672,11 @@ impl OrganizerEngine {
             let first = parts.next().map(|c| c.as_os_str().to_string_lossy().trim().to_lowercase());
             let inside_subfolder = parts.next().is_some();
             // مجلدات أنشأتها نسخ قديمة من البرنامج ليست تنظيماً للمستخدم
-            inside_subfolder && !matches!(first.as_deref(), Some("single tracks" | "unknown" | "array_organized"))
+            // ومجلد المراجعة كذلك: ملفاته تُخطَّط كملفات عادية، ويعيدها
+            // redirect_duplicates إليه فقط إن كان لها توأم خارجه
+            inside_subfolder
+                && !matches!(first.as_deref(), Some("single tracks" | "unknown" | "array_organized"))
+                && first.as_deref() != Some(DUPLICATES_FOLDER)
         };
         // معلومات كل ملف (فئة ومجموعة تسمية) لبناء بطاقات الملخص بعد حساب النقل
         let info_by_path: HashMap<PathBuf, (String, Option<NamingGroup>)> = raw_files
@@ -1197,6 +1201,7 @@ impl OrganizerEngine {
             }
         }
         let review_dir = source_path.join(DUPLICATES_FOLDER);
+        let in_review = |p: &Path| p.starts_with(&review_dir);
         let mut count = 0;
         for indices in by_size.values().filter(|v| v.len() > 1) {
             let mut by_digest: HashMap<u64, Vec<usize>> = HashMap::new();
@@ -1206,13 +1211,59 @@ impl OrganizerEngine {
                 }
             }
             for group in by_digest.values().filter(|v| v.len() > 1) {
-                for i in Self::rank_copies(files, group) {
-                    files[i].1 = review_dir.clone();
-                    count += 1;
+                // البصمة قد تتصادم: التطابق يُؤكَّد بمقارنة بايت ببايت قبل أي نقل
+                for same in Self::same_content_groups(files, group) {
+                    // ملف داخل «مكررات للمراجعة» ليس أصلًا أبدًا
+                    let outside: Vec<usize> = same.iter().copied().filter(|&i| !in_review(&files[i].0.path)).collect();
+                    if outside.is_empty() {
+                        // كل النسخ داخل المراجعة وبلا أصل خارجها: تُعامل ملفات عادية وتعود لفئتها
+                        continue;
+                    }
+                    for i in Self::rank_copies(files, &outside) {
+                        files[i].1 = review_dir.clone();
+                        count += 1;
+                    }
+                    // النسخ التي لها توأم خارج المراجعة تبقى فيه
+                    let inside: Vec<usize> = same.iter().copied().filter(|&i| in_review(&files[i].0.path)).collect();
+                    for i in inside {
+                        files[i].1 = review_dir.clone();
+                    }
                 }
             }
         }
         count
+    }
+
+    /// تقسيم مجموعة بصمة واحدة إلى مجموعات متطابقة فعلًا بايتًا ببايت
+    fn same_content_groups(files: &[(RawFileInfo, PathBuf)], group: &[usize]) -> Vec<Vec<usize>> {
+        let mut same: Vec<Vec<usize>> = Vec::new();
+        for &i in group {
+            match same.iter_mut().find(|g| Self::same_bytes(&files[g[0]].0.path, &files[i].0.path)) {
+                Some(g) => g.push(i),
+                None => same.push(vec![i]),
+            }
+        }
+        same
+    }
+
+    /// مقارنة ملفين بايتًا ببايت (بعد تساوي الحجم والبصمة)
+    fn same_bytes(a: &Path, b: &Path) -> bool {
+        use std::io::Read;
+        let (Ok(mut fa), Ok(mut fb)) = (fs::File::open(a), fs::File::open(b)) else { return false };
+        let mut ba = [0u8; 64 * 1024];
+        let mut bb = [0u8; 64 * 1024];
+        loop {
+            let (na, nb) = match (fa.read(&mut ba), fb.read(&mut bb)) {
+                (Ok(na), Ok(nb)) => (na, nb),
+                _ => return false,
+            };
+            if na != nb || ba[..na] != bb[..nb] {
+                return false;
+            }
+            if na == 0 {
+                return true;
+            }
+        }
     }
 
     /// «الاسم المرقّم»: نسخة صنعها ويندوز عند تكرار الاسم — تنتهي بـ(رقم)
@@ -2072,6 +2123,72 @@ trailer
         fs::write(root.join("b.txt"), b"identical1").unwrap();
         let (plan, _) = organize(&root, &rebuild());
         assert_eq!(plan.duplicates, 1);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// الإصلاح 1: ثلاث نسخ متطابقة بوقت تعديل واحد، والتنظيم مرتين — يجب أن تبقى
+    /// نسخة واحدة على الأقل خارج «مكررات للمراجعة» بعد كل تشغيل، في الوضعين.
+    #[test]
+    fn duplicates_never_leave_the_review_folder_without_an_original() {
+        for (label, options) in [("افتراضي", Options::default()), ("إعادة بناء", rebuild())] {
+            for run in 1..=2 {
+                let root = std::env::temp_dir().join(format!("array_test_dups_twice_{}_{run}", std::process::id()));
+                let _ = fs::remove_dir_all(&root);
+                fs::create_dir_all(&root).unwrap();
+                for name in ["عقد.txt", "عقد (1).txt", "عقد (2).txt"] {
+                    fs::write(root.join(name), b"same bytes").unwrap();
+                    set_modified(&root.join(name), 1_700_000_000);
+                }
+                for _ in 0..run {
+                    let (_, result) = organize(&root, &options);
+                    assert!(result.failed.is_empty(), "{label}: {:?}", result.failed);
+                }
+                let files = tree(&root);
+                let outside = files.iter().filter(|f| !f.starts_with("مكررات للمراجعة/")).count();
+                assert!(outside >= 1, "{label} تشغيل {run}: كل النسخ في المراجعة {files:?}");
+            }
+        }
+    }
+
+    /// الإصلاح 1: ملف في «مكررات للمراجعة» بلا توأم خارجه يُعامل ملفًا عاديًا ويعود لفئته.
+    #[test]
+    fn a_review_file_without_a_twin_goes_back_to_its_category() {
+        for (label, options) in [("افتراضي", Options::default()), ("إعادة بناء", rebuild())] {
+            let root = temp_tree(&format!("review_orphan_{label}"), &[]);
+            let lone = root.join(DUPLICATES_FOLDER).join("عقد الإيجار.txt");
+            fs::create_dir_all(lone.parent().unwrap()).unwrap();
+            fs::write(&lone, b"lonely bytes").unwrap();
+
+            let (plan, result) = organize(&root, &options);
+
+            assert!(result.failed.is_empty(), "{label}: {:?}", result.failed);
+            let files = tree(&root);
+            assert!(!files.iter().any(|f| f.starts_with(&format!("{DUPLICATES_FOLDER}/"))), "{label}: {files:?}");
+            assert_eq!(files.iter().filter(|f| f.starts_with("مستندات/")).count(), 1, "{label}: {files:?}");
+            assert_eq!(plan.duplicates, 0, "{label}");
+            fs::remove_dir_all(&root).unwrap();
+        }
+    }
+
+    /// الإصلاح 1: ملف في المراجعة له توأم خارجه يبقى في المراجعة، ولا يُختار أصلًا.
+    #[test]
+    fn a_review_file_with_a_twin_stays_in_review_and_is_never_the_original() {
+        let root = temp_tree("review_twin", &[]);
+        fs::write(root.join("عقد.txt"), b"same bytes").unwrap();
+        let copy = root.join(DUPLICATES_FOLDER).join("عقد (1).txt");
+        fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        fs::write(&copy, b"same bytes").unwrap();
+        // التوأم داخل المراجعة أقدم: لو اختير أصلًا لخرج الأصل من المراجعة
+        set_modified(&copy, 1_600_000_000);
+        set_modified(&root.join("عقد.txt"), 1_700_000_000);
+
+        let options = Options { rename_files: false, ..rebuild() };
+        let (_, result) = organize(&root, &options);
+
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        let files = tree(&root);
+        assert!(files.contains(&format!("{DUPLICATES_FOLDER}/عقد (1).txt")), "{files:?}");
+        assert!(files.contains(&"مستندات/نصوص/عقد.txt".to_string()), "{files:?}");
         fs::remove_dir_all(&root).unwrap();
     }
 
