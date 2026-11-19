@@ -192,6 +192,15 @@ impl SafetyChecker {
         }
     }
 
+    /// صورة غلاف ألبوم يضعها ويندوز بجانب الموسيقى (Folder.jpg، AlbumArtSmall.jpg،
+    /// AlbumArt_{GUID}_Large.jpg): تبقى في مكانها حتى لو فقدت صفة الإخفاء بالنسخ
+    pub fn is_album_art(name: &str) -> bool {
+        let lower = name.to_lowercase();
+        lower == "folder.jpg"
+            || lower == "albumartsmall.jpg"
+            || (lower.starts_with("albumart_{") && (lower.ends_with("}_large.jpg") || lower.ends_with("}_small.jpg")))
+    }
+
     /// هل يجب تخطّي هذا المجلد الفرعي بالاسم (مخفي أو مجلد نظام/برامج)؟
     pub fn is_skipped_dir_name(name: &str) -> bool {
         let lower = name.to_lowercase();

@@ -627,7 +627,7 @@ impl OrganizerEngine {
                 return false;
             }
             if !e.file_type().is_dir() {
-                return true;
+                return !SafetyChecker::is_album_art(&e.file_name().to_string_lossy());
             }
             if SafetyChecker::is_skipped_dir_name(&e.file_name().to_string_lossy()) {
                 return false;
@@ -1469,6 +1469,28 @@ pub(crate) mod tests {
     fn group_of(file_name: &str) -> String {
         let (artist, title, _) = OrganizerEngine::extract_audio_info(Path::new(file_name));
         group(&artist, &title).0
+    }
+
+    /// صور غلاف الألبوم من ويندوز تبقى بجانب الموسيقى حتى لو فقدت صفة الإخفاء
+    #[test]
+    fn album_art_stays_with_the_music_even_when_visible() {
+        let art = [
+            "Album/Folder.jpg",
+            "Album/AlbumArtSmall.jpg",
+            "Album/AlbumArt_{9C7E5A41-0000-4B2F-9D3A-1F2E3D4C5B6A}_Large.jpg",
+            "Album/albumart_{9C7E5A41-0000-4B2F-9D3A-1F2E3D4C5B6A}_small.JPG",
+            "Folder.jpg",
+        ];
+        let mut files = art.to_vec();
+        files.extend(["Album/song.mp3", "photo.jpg"]);
+        let root = temp_tree("album_art", &files);
+        let plan = OrganizerEngine::plan_with(&root, &rebuild()).unwrap();
+        for a in art {
+            assert!(!plan.moves.iter().any(|m| m.from == root.join(a)), "نُقلت صورة الغلاف {a}");
+        }
+        // صورة عادية بجانبها تُنظَّم كالمعتاد
+        assert!(plan.moves.iter().any(|m| m.from == root.join("photo.jpg")), "لم تُنظَّم الصورة العادية");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
