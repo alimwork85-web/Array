@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "array"
-version = "2.1.3"
+version = "2.1.4"
 dependencies = [
  "ar-reshaper",
  "chrono",
