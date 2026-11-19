@@ -2824,4 +2824,143 @@ trailer
         assert!(error.is_some_and(|e| e.contains("not-there.txt")));
         fs::remove_dir_all(&dir).unwrap();
     }
+
+    // ─── المجموعة الذهبية للأسماء (REPORTS/naming-golden.md) ───
+    // 88 اسمًا مموَّهًا، ناتجها الحالي هو المتوقع. الغرض أن يظهر أي تغيير في طبقة الأسماء
+    // كفشل هنا قبل أن يصل إلى ملفات المستخدم. لا تُعدَّل التوقعات إلا بقرار صريح من علي.
+
+    struct GoldenName {
+        /// المسار كما في القائمة (المجلد للتمييز فقط، لا يُقرأ من القرص)
+        file: &'static str,
+        kind: Kind,
+        /// هل يعتبره `is_junk_name` اسمًا رديئًا
+        junk: bool,
+        /// مجموعة التسمية؛ None = الاسم يبقى كما هو
+        group: Option<NamingGroup>,
+        /// الاسم الجديد؛ None = لا إعادة تسمية
+        new_name: Option<&'static str>,
+    }
+
+    const REC: Option<NamingGroup> = Some(NamingGroup::Recording);
+
+    const GOLDEN_NAMES: [GoldenName; 88] = [
+        // ── 62 اسمًا من مكتبة علي (مموَّهة) ──
+        GoldenName { file: "sample/AlbumArtSmall.jpg", kind: Kind::Image, junk: true, group: Some(NamingGroup::Junk), new_name: None },
+        GoldenName { file: "sample/Folder.jpg", kind: Kind::Image, junk: false, group: None, new_name: None },
+        GoldenName { file: "Studio Ensemble/Long Medley - Arr. Someone Else.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "music/طريق طويل امامي.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "music/كلام كثير at مكان بعيد.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "sample2/AlbumArtSmall.jpg", kind: Kind::Image, junk: true, group: Some(NamingGroup::Junk), new_name: None },
+        GoldenName { file: "music/سراب .. فنان تجريبي.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "music/الليل معكم.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "music/انشودة قصيدة اتظن انك عندما تركتني وذهبت بعيدا فوق بقاياي اتظن نسيت هويتي.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "music/نعم صامد.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "radio site/SiteName.com 143.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "Artist Name - Topic/La Yahtaj.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "Artist Name - Topic/طال الليل والرحلة طويلة.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "الشيخ فلان/《قل يا عبادي الذين أسرفوا على أنفسهم...》.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "الشيخ فلان/إلا رسول الله ﷺ ــ كلام رائع ــ الشيخ فلان.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "الشيخ فلان/رسالة من الشيخ فلان عن الأحوال الجارية فى العالم الإسلامى هذه الأيام (1).mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "الشيخ فلان/رائعة كلامية في وصف زماننا ــ فلان الفلاني.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "القارئ فلان/فلان الفلاني (إن تعذبهم فإنهم عبادك وإن تغفرلهم فإنك أنت العزيزالحكيم) Reader Name (Quran) HD.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "القارئ فلان/وَيَوْمَ يُنفَخُ فِي الصُّورِ فَفَزِعَ مَن فِي السَّمَاوَاتِ وَمَن فِي الْأَرْضِ 🎙 القـــارئ ： ف.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "القارئ فلان/فلان الفلاني (ولو ترى إذ وقفوا على ربهم) 1440هـ.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "material/تـهـون الـحيـــــــــــــــــاة.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "material/ما ضـرّه.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "material/صبرا ً يا أمــــــــاه.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "material/هل رأيت الغصن ...؟.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "material/أنشودة تجريبية-2.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "material/أنشودة تجريبية-3.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "material/أبو عبد فلان.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "material/مسير.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "material/نشيد.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "material/بشرى.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "material/شامخ.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "studio lo/studio lo - 2026-09-12 23-31 - 0m07s (1).mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "studio lo/studio lo - 2026-09-12 23-31 - 0m07s.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "misc/20250606 162959 IMG 2054.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "misc/20250607 130354 IMG 2060.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "misc/تسجيل صوتي - 2026-09-12 23-35 - 1h10m05s.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "misc/آن الخشوع - ÃÏÇÁ æÃáÍÇä ÝáÇä ÇáÝáÇäí.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "misc/هي فعلاً غريبة !!.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "misc/XD نص تجريبي.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "misc/03 اعطيته المكان واعطيته الموقع الحان الزمن الجميل.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "misc/Small Tone.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "misc/Small Tone (1).mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "misc/Brisk Step (4).mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "misc/Cut T2.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "misc/plugged in.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "misc/whiff.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "misc/Bismillah Tone.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "misc/16 - Salamu Alayka (Bonus Track - English Version - Vocals).mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "misc/If Allah is with you.. Superb Reminder by Sheikh Someone Else - YouTube$`Q Q i i.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "misc/Zafah Yemeniah - فلانة.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "misc/وادي بعيد .. موسيقى حزينة (1).mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "misc/دقة الستة Arab music.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "misc/رقصه على المزمار في عرس للجاليه اليمنيه بمدينه ما.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "review/Audio - 2026-09-12 23-26 - 0m09s.mp3", kind: Kind::Audio, junk: false, group: REC, new_name: Some("2026-09-12 23-26 تسجيل صوتي") },
+        GoldenName { file: "review/Audio - 2026-09-12 23-26 - 0m09s (1).mp3", kind: Kind::Audio, junk: false, group: REC, new_name: Some("2026-09-12 23-26 تسجيل صوتي") },
+        GoldenName { file: "review/AI Music - 2026-09-12 23-35 - 0m30s.mp3", kind: Kind::Audio, junk: false, group: REC, new_name: Some("2026-09-12 23-35 تسجيل صوتي") },
+        GoldenName { file: "review/AI Music - 2026-09-12 23-35 - 0m30s (3).mp3", kind: Kind::Audio, junk: false, group: REC, new_name: Some("2026-09-12 23-35 تسجيل صوتي") },
+        GoldenName { file: "recs/2026/2026-09-12 23-26 تسجيل صوتي.mp3", kind: Kind::Audio, junk: true, group: REC, new_name: Some("2026-09-12 23-26 تسجيل صوتي") },
+        GoldenName { file: "recs/2026/2026-09-12 23-26 تسجيل صوتي (1).mp3", kind: Kind::Audio, junk: true, group: REC, new_name: Some("2026-09-12 23-26 تسجيل صوتي") },
+        GoldenName { file: "recs/2026/2026-09-12 23-26 تسجيل صوتي (12).mp3", kind: Kind::Audio, junk: true, group: REC, new_name: Some("2026-09-12 23-26 تسجيل صوتي") },
+        GoldenName { file: "desktop.ini", kind: Kind::Other, junk: false, group: None, new_name: None },
+        GoldenName { file: ".array/history", kind: Kind::Other, junk: false, group: None, new_name: None },
+        // ── 26 نمطًا من الاختبارات الحالية ──
+        GoldenName { file: "IMG-20240512-WA0003.jpg", kind: Kind::Image, junk: false, group: Some(NamingGroup::Whatsapp), new_name: Some("2024-05-12 واتساب") },
+        GoldenName { file: "VID-20240512-WA0003.mp4", kind: Kind::Video, junk: false, group: Some(NamingGroup::Whatsapp), new_name: Some("2024-05-12 واتساب") },
+        GoldenName { file: "Screenshot 2024-05-12 143005.png", kind: Kind::Image, junk: false, group: Some(NamingGroup::Screenshot), new_name: Some("2024-05-12 14-30 لقطة شاشة") },
+        GoldenName { file: "لقطة شاشة 2024-05-12.png", kind: Kind::Image, junk: false, group: Some(NamingGroup::Screenshot), new_name: Some("2024-05-12 لقطة شاشة") },
+        GoldenName { file: "IMG 2353.jpg", kind: Kind::Image, junk: false, group: Some(NamingGroup::Camera), new_name: None },
+        GoldenName { file: "DSC_0042.jpg", kind: Kind::Image, junk: false, group: Some(NamingGroup::Camera), new_name: None },
+        GoldenName { file: "IMG_20240101_093000.jpg", kind: Kind::Image, junk: false, group: Some(NamingGroup::Camera), new_name: Some("2024-01-01 09-30 IMG_20240101_093000") },
+        GoldenName { file: "20260409_145348.mp3", kind: Kind::Audio, junk: true, group: REC, new_name: Some("2026-04-09 14-53 تسجيل صوتي") },
+        GoldenName { file: "٢٠٢٦٠٤٠٩_١٤٥٣٤٨.jpg", kind: Kind::Image, junk: true, group: Some(NamingGroup::Junk), new_name: Some("2026-04-09 14-53") },
+        GoldenName { file: "03b510f8-88aa-4487-ab22-bd6b93174921.mp3", kind: Kind::Audio, junk: true, group: REC, new_name: None },
+        GoldenName { file: "4749d951].jpg", kind: Kind::Image, junk: true, group: Some(NamingGroup::Junk), new_name: None },
+        GoldenName { file: "YouTube (1).mp3", kind: Kind::Audio, junk: true, group: REC, new_name: None },
+        GoldenName { file: "Untitled - 1.mp3", kind: Kind::Audio, junk: true, group: REC, new_name: None },
+        GoldenName { file: "Voice recording.mp3", kind: Kind::Audio, junk: true, group: REC, new_name: None },
+        GoldenName { file: "تسجيل.mp3", kind: Kind::Audio, junk: true, group: REC, new_name: None },
+        GoldenName { file: "مقطع صوتي.mp3", kind: Kind::Audio, junk: true, group: REC, new_name: None },
+        GoldenName { file: "أ.jpg", kind: Kind::Image, junk: true, group: Some(NamingGroup::Junk), new_name: None },
+        GoldenName { file: "a.mp3", kind: Kind::Audio, junk: true, group: REC, new_name: None },
+        GoldenName { file: "رد.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "CV.pdf", kind: Kind::Document, junk: false, group: None, new_name: None },
+        GoldenName { file: "ID.jpg", kind: Kind::Image, junk: false, group: None, new_name: None },
+        GoldenName { file: "Audio - 2026-09-16 02-11 - 2h18m11s.mp3", kind: Kind::Audio, junk: false, group: REC, new_name: Some("2026-09-16 02-11 تسجيل صوتي") },
+        GoldenName { file: "Recording - 2026-09-12 23-26 - 12m03s.mp3", kind: Kind::Audio, junk: false, group: REC, new_name: Some("2026-09-12 23-26 تسجيل صوتي") },
+        GoldenName { file: "Audio - 2026-09-12 23-26.mp3", kind: Kind::Audio, junk: true, group: REC, new_name: Some("2026-09-12 23-26 تسجيل صوتي") },
+        GoldenName { file: "صورة - 2026-07-28.jpg", kind: Kind::Image, junk: false, group: None, new_name: None },
+        GoldenName { file: "133649_466985853345771_200500525.jpg", kind: Kind::Image, junk: true, group: Some(NamingGroup::Junk), new_name: None },
+    ];
+
+    /// الناتج الحالي لكل اسم: التصنيف، والمجموعة، والاسم الجديد.
+    /// الأسماء لا تُقرأ من القرص، فالمجموعة تقيس طبقة الأسماء وحدها.
+    #[test]
+    fn golden_naming_set_is_unchanged() {
+        let options = Options::default();
+        for g in GOLDEN_NAMES.iter() {
+            let path = Path::new(g.file);
+            let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+            // كما في `plan_with`: المجموعة والسياق يُحسبان على الاسم المنظَّف
+            let clean = OrganizerEngine::clean_string(&stem);
+            assert_eq!(naming::is_junk_name(&clean), g.junk, "{}: حكم الاسم الرديء تغيّر", g.file);
+            assert_eq!(naming::naming_group(path, &clean, g.kind), g.group, "{}: مجموعة التسمية تغيّرت", g.file);
+            let file = RawFileInfo {
+                path: path.to_path_buf(),
+                category: String::new(),
+                track_index: None,
+                new_stem: clean.clone(),
+                kind: g.kind,
+                naming_group: g.group,
+                audio_tag_name: None,
+                placeholder_context: naming::placeholder_context(&clean),
+                extension: path.extension().unwrap_or_default().to_string_lossy().to_string(),
+                ai: false,
+            };
+            assert_eq!(OrganizerEngine::trusted_name(&file, &options).as_deref(), g.new_name, "{}: الاسم الناتج تغيّر", g.file);
+        }
+    }
 }
