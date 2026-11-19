@@ -444,12 +444,19 @@ impl OrganizerEngine {
     /// لا ضم عند وجود مجلدين متطابقين، ولا إنشاء مجلد جديد بهذه القاعدة.
     fn speaker_folder(speaker: &str, keywords: &[String], existing: &[String]) -> Option<String> {
         let words: Vec<String> = speaker.split_whitespace().map(Self::group_key).filter(|w| !w.is_empty()).collect();
-        if words.len() != 2 || !keywords.contains(&words[0]) || words[1].chars().count() < 4 {
+        // آخر كلمتين: لقب + كلمة واحدة، فتُقبل الأسماء الطويلة التي تنتهي بهذا النمط
+        if words.len() < 2 {
+            return None;
+        }
+        let (title, name) = (&words[words.len() - 2], &words[words.len() - 1]);
+        // «للشيخ» و«الشيخ» لقب واحد
+        let bare = |w: &str| w.trim_start_matches(['ل', 'ا']).to_string();
+        if !keywords.iter().any(|k| bare(k) == bare(title)) || name.chars().count() < 4 {
             return None;
         }
         let mut matches = existing
             .iter()
-            .filter(|dir| Self::group_key(dir.split_whitespace().last().unwrap_or_default()) == words[1]);
+            .filter(|dir| Self::group_key(dir.split_whitespace().last().unwrap_or_default()) == *name);
         let only = matches.next()?;
         matches.next().is_none().then(|| only.clone())
     }
@@ -698,11 +705,11 @@ impl OrganizerEngine {
                         (if is_ai { "Music" } else { "Recordings" }, clean, None, tag_name, is_ai)
                     } else {
                         let (speaker, speaker_key) = Self::extract_group_key(&artist, &title, &keywords);
-                        // «الشيخ الكملي» يُضم إلى مجلد «سعيد الكملي» إن كان وحده المطابق
-                        if speaker_key != "single tracks" {
-                            if let Some(dir) = Self::speaker_folder(&speaker, &keywords, &existing_music_dirs) {
-                                merge_dirs.insert(path.clone(), dir);
-                            }
+                        // «الشيخ الكملي» يُضم إلى مجلد «سعيد الكملي» إن كان وحده المطابق؛
+                        // وبلا فنان يُفحص الاسم نفسه («الشيخ الكملي.mp3»)
+                        let candidate = if speaker_key == "single tracks" { title.as_str() } else { speaker.as_str() };
+                        if let Some(dir) = Self::speaker_folder(candidate, &keywords, &existing_music_dirs) {
+                            merge_dirs.insert(path.clone(), dir);
                         }
                         let speaker = (speaker_key != "single tracks").then_some(speaker);
                         let track = grouping::read_track(&path, source_path, music_dir, &artist, &title, speaker.as_deref(), &options.ai_markers);
@@ -2393,6 +2400,36 @@ trailer
         fs::remove_dir_all(&parent).unwrap();
     }
 
+    /// الإصلاح 6: الاسم الطويل الذي ينتهي بلقب + كلمة يُضم أيضًا («... الجميل للشيخ الكملي»).
+    #[test]
+    fn a_long_name_ending_with_the_speaker_merges_too() {
+        let parent = temp_tree("merge_long", &[]);
+        let root = parent.join("موسيقى");
+        fs::create_dir_all(root.join("سعيد الكملي")).unwrap();
+        fs::write(root.join("استمتع بهذا المقطع الجميل للشيخ الكملي - الحلقة 13.mp3"), b"long").unwrap();
+
+        organize(&root, &Options::default());
+
+        let files = tree(&root);
+        assert!(files.iter().any(|f| f.starts_with("سعيد الكملي/")), "{files:?}");
+        fs::remove_dir_all(&parent).unwrap();
+    }
+
+    /// الإصلاح 6: ملف بلا فنان ولا شرطة، اسمه نفسه «لقب + كلمة» يُضم.
+    #[test]
+    fn a_plain_speaker_name_merges_too() {
+        let parent = temp_tree("merge_plain", &[]);
+        let root = parent.join("موسيقى");
+        fs::create_dir_all(root.join("سعيد الكملي")).unwrap();
+        fs::write(root.join("الشيخ الكملي.mp3"), b"plain").unwrap();
+
+        organize(&root, &Options::default());
+
+        let files = tree(&root);
+        assert!(files.iter().any(|f| f.starts_with("سعيد الكملي/")), "{files:?}");
+        fs::remove_dir_all(&parent).unwrap();
+    }
+
     /// الإصلاح 4: الكلمة تطابق مجلدين ← لا ضم إلى أي منهما.
     #[test]
     fn an_ambiguous_speaker_is_not_merged() {
@@ -2435,13 +2472,14 @@ trailer
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("Audio - 2026-09-12 23-26 - 0m11s.mp3"), b"one").unwrap();
         fs::write(root.join("Audio - 2026-09-12 23-26 - 1m27s (1).mp3"), b"two-two").unwrap();
+        fs::write(root.join("Audio - 2026-09-16 02-11 - 1h51m43s.mp3"), b"three-three").unwrap();
 
         let (plan, _) = organize(&root, &Options::default());
 
         let files = tree(&root);
-        assert_eq!(files.iter().filter(|f| f.starts_with("تسجيلات/2026/")).count(), 2, "{files:?}");
+        assert_eq!(files.iter().filter(|f| f.starts_with("تسجيلات/2026/")).count(), 3, "{files:?}");
         let recordings = plan.naming_groups.iter().find(|(g, _)| *g == NamingGroup::Recording);
-        assert_eq!(recordings.map(|(_, s)| s.count), Some(2), "{:?}", plan.naming_groups);
+        assert_eq!(recordings.map(|(_, s)| s.count), Some(3), "{:?}", plan.naming_groups);
         fs::remove_dir_all(&parent).unwrap();
     }
 

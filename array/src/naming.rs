@@ -25,7 +25,7 @@ static RE_NAME_DATE: LazyLock<Regex> = LazyLock::new(|| {
 /// اسم تسجيل آلي من مسجّل الصوت: "Audio - 2026-09-12 23-26 - 0m11s" (النمط كاملًا،
 /// لا كلمة "Audio" وحدها)؛ صيغ أخرى: Recording وVoice وAI Music
 static RE_AUDIO_RECORDING: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(?:Audio|Recording|Voice|AI Music)\s*-\s*\d{4}-\d{2}-\d{2} \d{2}-\d{2}\s*-\s*\d+m\d{2}s(?:\s*\(\d+\))?$")
+    Regex::new(r"^(?:Audio|Recording|Voice|AI Music)\s*-\s*\d{4}-\d{2}-\d{2} \d{2}-\d{2}\s*-\s*(?:\d+h)?\d+m\d{2}s(?:\s*\(\d+\))?$")
         .unwrap()
 });
 
@@ -496,6 +496,9 @@ mod tests {
         assert!(is_audio_recording("Audio - 2026-09-12 23-26 - 0m11s"));
         assert!(is_audio_recording("Audio - 2026-09-12 23-26 - 1m27s (1)"));
         assert!(is_audio_recording("Recording - 2026-09-12 23-26 - 12m03s"));
+        // مدة بالساعات كما في مسجّل الصوت الطويل
+        assert!(is_audio_recording("Audio - 2026-09-16 02-11 - 1h51m43s"));
+        assert!(is_audio_recording("Audio - 2026-09-16 02-11 - 2h18m11s"));
         assert!(is_audio_recording("AI Music - 2026-09-12 23-35 - 0m30s"));
         // كلمة Audio وحدها ليست نمطًا
         assert!(!is_audio_recording("Audio Love Song"));
