@@ -429,6 +429,21 @@ impl OrganizerEngine {
         ("Single Tracks".to_string(), "single tracks".to_string())
     }
 
+    /// مجلد موجود يُضم إليه اسم «لقب + كلمة واحدة» (الشيخ الكملي ← سعيد الكملي).
+    /// بشرط: الكلمة 4 أحرف فأكثر بعد التطبيع، وهي آخر كلمة في مجلد واحد فقط.
+    /// لا ضم عند وجود مجلدين متطابقين، ولا إنشاء مجلد جديد بهذه القاعدة.
+    fn speaker_folder(speaker: &str, keywords: &[String], existing: &[String]) -> Option<String> {
+        let words: Vec<String> = speaker.split_whitespace().map(Self::group_key).filter(|w| !w.is_empty()).collect();
+        if words.len() != 2 || !keywords.contains(&words[0]) || words[1].chars().count() < 4 {
+            return None;
+        }
+        let mut matches = existing
+            .iter()
+            .filter(|dir| Self::group_key(dir.split_whitespace().last().unwrap_or_default()) == words[1]);
+        let only = matches.next()?;
+        matches.next().is_none().then(|| only.clone())
+    }
+
     fn move_file(src: &Path, dst: &Path) -> std::io::Result<()> {
         // fs::rename على ويندوز يستبدل الملف الموجود، فلا نكتب أبداً فوق ملف قائم
         if dst.exists() {
@@ -591,6 +606,18 @@ impl OrganizerEngine {
         let music_dir = &category_dirs["Music"];
         let mut raw_files: Vec<RawFileInfo> = Vec::new();
         let mut tracks: Vec<Track> = Vec::new();
+        // مجلدات الموسيقى الموجودة: الأسماء تُعاد استخدامها، ومنها يُختار مجلد الضم
+        let existing_music_dirs: Vec<String> = fs::read_dir(music_dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        // وجهة الضم لكل ملف: «لقب + كلمة واحدة» يطابق مجلدًا موجودًا واحدًا
+        let mut merge_dirs: HashMap<PathBuf, String> = HashMap::new();
 
         for path in files {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_string();
@@ -612,6 +639,12 @@ impl OrganizerEngine {
                         (if is_ai { "Music" } else { "Recordings" }, clean, None, tag_name, is_ai)
                     } else {
                         let (speaker, speaker_key) = Self::extract_group_key(&artist, &title, &keywords);
+                        // «الشيخ الكملي» يُضم إلى مجلد «سعيد الكملي» إن كان وحده المطابق
+                        if speaker_key != "single tracks" {
+                            if let Some(dir) = Self::speaker_folder(&speaker, &keywords, &existing_music_dirs) {
+                                merge_dirs.insert(path.clone(), dir);
+                            }
+                        }
                         let speaker = (speaker_key != "single tracks").then_some(speaker);
                         let track = grouping::read_track(&path, source_path, music_dir, &artist, &title, speaker.as_deref(), &options.ai_markers);
                         ("Music", clean, Some(track), tag_name, false)
@@ -660,17 +693,13 @@ impl OrganizerEngine {
             });
         }
 
-        // تجميع الموسيقى بمقارنة الأدلة بين كل الملفات
-        let existing_music_dirs: Vec<String> = fs::read_dir(music_dir)
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-                    .map(|e| e.file_name().to_string_lossy().to_string())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let assignments = grouping::assign(&tracks, &existing_music_dirs);
+        let mut assignments = grouping::assign(&tracks, &existing_music_dirs);
+        // ملف ضمّه لقاعدة المتحدث يُنقل إلى المجلد الموجود المطابق
+        for f in &raw_files {
+            if let (Some(i), Some(dir)) = (f.track_index, merge_dirs.get(&f.path)) {
+                assignments[i] = Assignment::Folder(dir.clone());
+            }
+        }
         let misc_dir = music_dir.join(grouping::misc_folder_name(&existing_music_dirs));
         let ai_dir = music_dir.join(grouping::ai_folder_name(&existing_music_dirs));
         // مجلدات البرنامج (منوعات، ذكاء اصطناعي، تسجيلات) ليست تنظيماً للمستخدم إذا كان
@@ -2235,6 +2264,55 @@ trailer
             "عمرو دياب/عمرو دياب - نور العين.mp3",
             "عمرو دياب/عمرو دياب - وياه.mp3",
         ], "{files:?}");
+        fs::remove_dir_all(&parent).unwrap();
+    }
+
+    /// الإصلاح 4: «الشيخ الكملي» يُضم إلى مجلد «سعيد الكملي» الموجود (آخر كلمة واحدة).
+    #[test]
+    fn a_speaker_title_merges_into_the_only_matching_folder() {
+        let parent = temp_tree("merge_speaker", &[]);
+        let root = parent.join("موسيقى");
+        fs::create_dir_all(root.join("سعيد الكملي")).unwrap();
+        fs::write(root.join("الشيخ الكملي - الحلقة 23.mp3"), b"merge").unwrap();
+
+        organize(&root, &Options::default());
+
+        let files = tree(&root);
+        assert!(files.contains(&"سعيد الكملي/الشيخ الكملي - الحلقة 23.mp3".to_string()), "{files:?}");
+        assert!(!root.join("الشيخ الكملي").exists(), "{files:?}");
+        fs::remove_dir_all(&parent).unwrap();
+    }
+
+    /// الإصلاح 4: الكلمة تطابق مجلدين ← لا ضم إلى أي منهما.
+    #[test]
+    fn an_ambiguous_speaker_is_not_merged() {
+        let parent = temp_tree("merge_ambiguous", &[]);
+        let root = parent.join("موسيقى");
+        fs::create_dir_all(root.join("محمد العريفي")).unwrap();
+        fs::create_dir_all(root.join("عبدالله العريفي")).unwrap();
+        fs::write(root.join("الشيخ العريفي.mp3"), b"one").unwrap();
+        fs::write(root.join("الشيخ العريفي - محاضرة.mp3"), b"two-two").unwrap();
+
+        organize(&root, &Options::default());
+
+        let files = tree(&root);
+        assert!(!files.iter().any(|f| f.starts_with("محمد العريفي/") || f.starts_with("عبدالله العريفي/")), "{files:?}");
+        fs::remove_dir_all(&parent).unwrap();
+    }
+
+    /// الإصلاح 4: كلمة من ثلاثة أحرف لا تُضم، ولا يُنشأ مجلد جديد بهذه القاعدة.
+    #[test]
+    fn a_short_speaker_word_is_not_merged() {
+        let parent = temp_tree("merge_short", &[]);
+        let root = parent.join("موسيقى");
+        fs::create_dir_all(root.join("زيد علي")).unwrap();
+        fs::write(root.join("الشيخ علي - محاضرة.mp3"), b"short").unwrap();
+
+        organize(&root, &Options::default());
+
+        let files = tree(&root);
+        assert!(!files.iter().any(|f| f.starts_with("زيد علي/")), "{files:?}");
+        assert!(!root.join("الشيخ علي").exists(), "{files:?}");
         fs::remove_dir_all(&parent).unwrap();
     }
 
