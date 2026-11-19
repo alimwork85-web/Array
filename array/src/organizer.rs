@@ -1282,15 +1282,27 @@ impl OrganizerEngine {
         let lower = |p: &Path| p.to_string_lossy().to_lowercase();
 
         for (f, target_dir) in files {
-            let mut dest_path = target_dir.join(format!("{}.{}", f.new_stem, f.extension));
-            let mut counter = 1;
-
             // تجنب تكرار أسماء الملفات المتشابهة (الموجودة فعلاً أو المحجوزة في الخطة)؛
             // إذا كانت الوجهة هي مكان الملف نفسه فهو في مكانه الصحيح ولا يتحرك
             let source_key = lower(&f.path);
-            while lower(&dest_path) != source_key && (dest_path.exists() || reserved.contains(&lower(&dest_path))) {
-                dest_path = target_dir.join(format!("{} ({}).{}", f.new_stem, counter, f.extension));
-                counter += 1;
+            // ponytail: ملف في مجلده الصحيح يحمل «الاسم» أو «الاسم (رقم)» لا يُعاد ترقيمه؛ بلا هذا السطر
+            // ينتقل الفراغ في السلسلة خطوة كل تشغيل (المستندات المسجلة تتحرك إلى ما لا نهاية)
+            let own_name = f.path.parent() == Some(target_dir.as_path()) && {
+                let cur = f.path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                let numbered = cur
+                    .strip_prefix(f.new_stem.as_str())
+                    .and_then(|r| r.strip_prefix(" ("))
+                    .and_then(|r| r.strip_suffix(')'));
+                cur.eq_ignore_ascii_case(&f.new_stem)
+                    || numbered.is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+            };
+            let mut dest_path = if own_name { f.path.clone() } else { target_dir.join(format!("{}.{}", f.new_stem, f.extension)) };
+            let mut counter = 1;
+            if !own_name {
+                while lower(&dest_path) != source_key && (dest_path.exists() || reserved.contains(&lower(&dest_path))) {
+                    dest_path = target_dir.join(format!("{} ({}).{}", f.new_stem, counter, f.extension));
+                    counter += 1;
+                }
             }
             reserved.insert(lower(&dest_path));
 
@@ -2757,6 +2769,37 @@ trailer
         assert!(root.join("locked.pdf").exists());
         assert!(!root.join("مستندات/PDF/locked.pdf").exists());
         drop(lock);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// التشغيل الثاني يستقر: تسجيلات متطابقة الاسم موجودة أصلاً في مجلدها لا تُرقَّم من جديد
+    #[test]
+    fn second_run_renames_nothing() {
+        let root = temp_tree("renumber", &[]);
+        // بلا `.array` تُعدّ مجلدات البرنامج مجلدات مستخدم فلا تُلمس
+        fs::create_dir_all(root.join(".array")).unwrap();
+        let dir = root.join("تسجيلات/2026");
+        fs::create_dir_all(&dir).unwrap();
+        // أرقام غير متتالية: الفراغات هي ما يجعل الترقيم يدور كل تشغيل
+        for (i, n) in [0, 1, 3, 7, 12].into_iter().enumerate() {
+            let name = if n == 0 {
+                "2026-09-12 23-26 تسجيل صوتي.mp3".to_string()
+            } else {
+                format!("2026-09-12 23-26 تسجيل صوتي ({}).mp3", n)
+            };
+            fs::write(dir.join(name), format!("take {i}")).unwrap();
+        }
+
+        organize(&root, &rebuild());
+        let settled = tree(&root);
+
+        for run in 2..=4 {
+            let plan = OrganizerEngine::plan(&root, &rebuild()).unwrap();
+            let again: Vec<String> = plan.moves.iter().map(|m| m.from.file_name().unwrap().to_string_lossy().to_string()).collect();
+            assert!(again.is_empty(), "التشغيل {run} أعاد التسمية: {again:?}");
+            assert_eq!(settled, tree(&root));
+        }
+
         fs::remove_dir_all(&root).unwrap();
     }
 }
