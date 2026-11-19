@@ -333,6 +333,8 @@ struct RawFileInfo {
     /// سياق من الاسم العام نفسه ("تسجيل صوتي") إن وُجد
     placeholder_context: Option<String>,
     extension: String,
+    /// ملف ذكاء اصطناعي: وجهته مجلد الذكاء الاصطناعي مباشرة
+    ai: bool,
 }
 
 pub struct OrganizerEngine;
@@ -595,19 +597,24 @@ impl OrganizerEngine {
             let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
             let file_type = Self::get_file_type(&ext);
             let kind = Self::naming_kind(&file_type);
-            let (category, clean_name, track, audio_tag_name) = match file_type {
+            let (category, clean_name, track, audio_tag_name, ai) = match file_type {
                 FileType::Audio => {
                     let (artist, title, tag_title) = Self::extract_audio_info(&path);
                     let clean = Self::best_name(&stem, tag_title.clone());
                     let tag_name = tag_title.clone().map(|t| Self::tag_name(&artist, &t));
                     // تسجيل صوتي اسمه لا يدل عليه: مجلد التسجيلات لا الموسيقى
-                    if naming::naming_group(&path, &clean, Kind::Audio) == Some(NamingGroup::Recording) {
-                        ("Recordings", clean, None, tag_name)
+                    let recording = naming::is_audio_recording(&stem)
+                        || naming::naming_group(&path, &clean, Kind::Audio) == Some(NamingGroup::Recording);
+                    if recording {
+                        // «AI Music» يُفحص أولًا بعلامات الذكاء الاصطناعي: مجلد الذكاء الاصطناعي
+                        let relative = path.strip_prefix(source_path).unwrap_or(&path).to_string_lossy().to_string();
+                        let is_ai = grouping::contains_marker(&format!("{stem} {relative}"), &options.ai_markers);
+                        (if is_ai { "Music" } else { "Recordings" }, clean, None, tag_name, is_ai)
                     } else {
                         let (speaker, speaker_key) = Self::extract_group_key(&artist, &title, &keywords);
                         let speaker = (speaker_key != "single tracks").then_some(speaker);
                         let track = grouping::read_track(&path, source_path, music_dir, &artist, &title, speaker.as_deref(), &options.ai_markers);
-                        ("Music", clean, Some(track), tag_name)
+                        ("Music", clean, Some(track), tag_name, false)
                     }
                 }
                 other => {
@@ -618,7 +625,7 @@ impl OrganizerEngine {
                         FileType::Installer => "Installers",
                         _ => "Archives",
                     };
-                    (category, Self::clean_string(&stem), None, None)
+                    (category, Self::clean_string(&stem), None, None, false)
                 }
             };
             // فئة موقوفة: ملفاتها تبقى في مكانها مع السبب
@@ -649,6 +656,7 @@ impl OrganizerEngine {
                 audio_tag_name,
                 placeholder_context,
                 extension,
+                ai,
             });
         }
 
@@ -738,17 +746,21 @@ impl OrganizerEngine {
             .into_iter()
             .zip(folder_dates)
             .map(|(mut f, date)| {
-                let dir = match f.track_index.map(|i| &assignments[i]) {
+                let dir = if f.ai {
+                    ai_dir.clone()
+                } else {
+                    match f.track_index.map(|i| &assignments[i]) {
                     Some(Assignment::Folder(name)) => music_dir.join(name),
                     Some(Assignment::Ai) => ai_dir.clone(),
                     Some(Assignment::Misc) => misc_dir.clone(),
-                    None => match f.category.as_str() {
-                        "Pictures" | "Recordings" => Self::year_dir(&category_dirs[f.category.as_str()], &existing_years, &split_years, date, f.category.as_str()),
-                        "Videos" if options.videos_by_year => Self::year_dir(&category_dirs["Videos"], &existing_years, &split_years, date, "Videos"),
-                        // المستندات تُقسم فرعياً بنوعها
-                        "Documents" => category_dirs["Documents"].join(Self::document_folder(&f.extension)),
-                        other => category_dirs[other].clone(),
-                    },
+                        None => match f.category.as_str() {
+                            "Pictures" | "Recordings" => Self::year_dir(&category_dirs[f.category.as_str()], &existing_years, &split_years, date, f.category.as_str()),
+                            "Videos" if options.videos_by_year => Self::year_dir(&category_dirs["Videos"], &existing_years, &split_years, date, "Videos"),
+                            // المستندات تُقسم فرعياً بنوعها
+                            "Documents" => category_dirs["Documents"].join(Self::document_folder(&f.extension)),
+                            other => category_dirs[other].clone(),
+                        },
+                    }
                 };
                 if let Some(name) = Self::trusted_name(&f, options) {
                     f.new_stem = name;
@@ -2223,6 +2235,41 @@ trailer
             "عمرو دياب/عمرو دياب - نور العين.mp3",
             "عمرو دياب/عمرو دياب - وياه.mp3",
         ], "{files:?}");
+        fs::remove_dir_all(&parent).unwrap();
+    }
+
+    /// الإصلاح 3: أسماء مسجّل الصوت (لا كلمة "Audio" وحدها) تسجيلات لا موسيقى،
+    /// وتذهب إلى مجلد سنة التاريخ المكتوب في الاسم.
+    #[test]
+    fn audio_recorder_names_are_recordings_by_year() {
+        let parent = temp_tree("rec_names", &[]);
+        let root = parent.join("موسيقى");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("Audio - 2026-09-12 23-26 - 0m11s.mp3"), b"one").unwrap();
+        fs::write(root.join("Audio - 2026-09-12 23-26 - 1m27s (1).mp3"), b"two-two").unwrap();
+
+        let (plan, _) = organize(&root, &Options::default());
+
+        let files = tree(&root);
+        assert_eq!(files.iter().filter(|f| f.starts_with("تسجيلات/2026/")).count(), 2, "{files:?}");
+        let recordings = plan.naming_groups.iter().find(|(g, _)| *g == NamingGroup::Recording);
+        assert_eq!(recordings.map(|(_, s)| s.count), Some(2), "{:?}", plan.naming_groups);
+        fs::remove_dir_all(&parent).unwrap();
+    }
+
+    /// الإصلاح 3: «AI Music» يُفحص بعلامات الذكاء الاصطناعي قبل تصنيفه تسجيلًا.
+    #[test]
+    fn an_ai_music_recording_goes_to_the_ai_folder() {
+        let parent = temp_tree("rec_ai", &[]);
+        let root = parent.join("موسيقى");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("AI Music - 2026-09-12 23-35 - 0m30s.mp3"), b"ai").unwrap();
+
+        organize(&root, &Options::default());
+
+        let files = tree(&root);
+        assert!(files.iter().any(|f| f.starts_with("ذكاء اصطناعي/")), "{files:?}");
+        assert!(!files.iter().any(|f| f.starts_with("تسجيلات/")), "{files:?}");
         fs::remove_dir_all(&parent).unwrap();
     }
 

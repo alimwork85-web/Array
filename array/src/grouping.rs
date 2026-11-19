@@ -213,7 +213,7 @@ fn first_words_key(text: &str) -> Option<(String, String)> {
 }
 
 /// العلامة تُطابق كلمات كاملة فقط ("udio" لا تُطابق داخل "audio")
-fn contains_marker(text: &str, markers: &[String]) -> bool {
+pub(crate) fn contains_marker(text: &str, markers: &[String]) -> bool {
     let words = |t: &str| -> String {
         let cleaned: String = normalize_arabic(&t.to_lowercase()).chars().map(|c| if c.is_alphanumeric() { c } else { ' ' }).collect();
         format!(" {} ", cleaned.split_whitespace().collect::<Vec<_>>().join(" "))

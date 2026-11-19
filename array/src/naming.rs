@@ -22,6 +22,18 @@ static RE_NAME_DATE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:^|[^0-9])((?:19|20)[0-9]{2})[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12][0-9]|3[01])(?:[ _T-]?([01][0-9]|2[0-3])[-_.:]?([0-5][0-9])(?:[-_.:]?([0-5][0-9]))?)?(?:[^0-9]|$)").unwrap()
 });
 
+/// اسم تسجيل آلي من مسجّل الصوت: "Audio - 2026-09-12 23-26 - 0m11s" (النمط كاملًا،
+/// لا كلمة "Audio" وحدها)؛ صيغ أخرى: Recording وVoice وAI Music
+static RE_AUDIO_RECORDING: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:Audio|Recording|Voice|AI Music)\s*-\s*\d{4}-\d{2}-\d{2} \d{2}-\d{2}\s*-\s*\d+m\d{2}s(?:\s*\(\d+\))?$")
+        .unwrap()
+});
+
+/// هل الاسم اسم تسجيل آلي كامل النمط؟
+pub fn is_audio_recording(name: &str) -> bool {
+    RE_AUDIO_RECORDING.is_match(to_western_digits(name).trim())
+}
+
 /// التاريخ والوقت المكتوبان في الاسم نفسه (غالباً وقت التصوير)، بصيغة "2026-04-09 14-53"
 fn date_from_name(name: &str) -> Option<String> {
     let name = to_western_digits(name);
@@ -176,6 +188,10 @@ pub fn naming_group(path: &Path, stem: &str, kind: Kind) -> Option<NamingGroup> 
     }
     if RE_CAMERA.is_match(&stem) {
         return Some(NamingGroup::Camera);
+    }
+    // اسم مسجّل الصوت الكامل: تسجيل لا أغنية، ولا علاقة له بكلمة «Audio» وحدها
+    if is_audio_recording(&stem) {
+        return Some(NamingGroup::Recording);
     }
     if !is_junk_name(&stem) {
         return None;
@@ -473,6 +489,23 @@ mod tests {
         assert_eq!(join_name("2024-05-12 14-30", None), "2024-05-12 14-30");
         // لا وسم فارغ ولا مسافة زائدة
         assert_eq!(join_name("2024-05-12 14-30", Some("  ")), "2024-05-12 14-30");
+    }
+
+    #[test]
+    fn audio_recorder_names_match_the_whole_pattern_only() {
+        assert!(is_audio_recording("Audio - 2026-09-12 23-26 - 0m11s"));
+        assert!(is_audio_recording("Audio - 2026-09-12 23-26 - 1m27s (1)"));
+        assert!(is_audio_recording("Recording - 2026-09-12 23-26 - 12m03s"));
+        assert!(is_audio_recording("AI Music - 2026-09-12 23-35 - 0m30s"));
+        // كلمة Audio وحدها ليست نمطًا
+        assert!(!is_audio_recording("Audio Love Song"));
+        assert!(!is_audio_recording("Audio"));
+        assert!(!is_audio_recording("Audio - 2026-09-12 - 0m11s"));
+        // التاريخ يُقرأ من الاسم نفسه
+        assert_eq!(
+            trusted_date(Path::new("Audio - 2026-09-12 23-26 - 0m11s.mp3"), Kind::Audio).map(|(d, _)| d),
+            Some("2026-09-12 23-26".to_string())
+        );
     }
 
     #[test]
