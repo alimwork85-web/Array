@@ -7,7 +7,7 @@
 - الفرع: **`main`**، الشجرة نظيفة، مرفوع إلى `github.com/alimwork85-web/Array` (مستودع **عام**).
 - الإصدار الحالي **2.1.6** منشور: Release `v2.1.6` ومعه `Array-2.1.6.exe` مبنية على GitHub Actions.
 - الـEXE المحلي: `C:\Users\suailali\Desktop\المستودع\Array-2.1.6.exe` + اختصاران (`Desktop\Array.lnk`، `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Array.lnk`) يشيران إليه.
-- البوابة الخضراء: `cargo test` = **133 ناجح / 0 فاشل / 1 متجاهَل**، `cargo build --release` = **0 تحذير**، EXE ≈ 12.29 MB.
+- البوابة الخضراء: `cargo test` = **133 ناجح / 0 فاشل / 1 متجاهَل**، `cargo build --release` = **0 تحذير**، EXE ≈ 12.28 MB.
 - المراحل المنجزة: 0، 1-أ، 2، 1، 3، 5، 4 — كل واحدة بتقريرها في `REPORTS/phase-*.md`. فروع `plan/phase-*` حُذفت بعد الدمج.
 
 ## إصلاحات المراجعة — منجزة (2.1.1 و2.1.2)
@@ -52,7 +52,7 @@
 - للإصدار: مهارة `array-file-organizer` فيها الخطوات الكاملة (bump، build.rs، Actions، الاختصارات، التحقق).
 
 ## أرقام سريعة
-- الاختبارات: 133/0/1. البناء النظيف: 0 تحذير. حجم الـEXE: 12.29 MB.
+- الاختبارات: 133/0/1. البناء النظيف: 0 تحذير. حجم الـEXE: 12.28 MB.
 - مجلدات العينات المؤقتة: `%LOCALAPPDATA%\Temp\array-phase1…5` (يمكن حذفها).
 - `array/target` = عدة غيغابايت، حذفه آمن وغير مأمور.
 - مهارة المشروع: `array-file-organizer` (اقرأها قبل أي عمل على Array).
