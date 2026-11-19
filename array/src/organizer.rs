@@ -337,6 +337,16 @@ struct RawFileInfo {
     ai: bool,
 }
 
+/// نتيجة فحص «مكررات للمراجعة»: ما له توأم مطابق خارج المجلد، وما لا أصل له
+pub struct DuplicateScan {
+    /// ملفات لها توأم مطابق بايتًا ببايت خارج مجلد المراجعة
+    pub movable: Vec<PathBuf>,
+    /// ملفات بلا أصل خارج المجلد: لا تُلمس أبدًا
+    pub orphans: Vec<PathBuf>,
+    /// مجموع أحجام الملفات القابلة للنقل
+    pub size: u64,
+}
+
 pub struct OrganizerEngine;
 
 impl OrganizerEngine {
@@ -442,6 +452,55 @@ impl OrganizerEngine {
             .filter(|dir| Self::group_key(dir.split_whitespace().last().unwrap_or_default()) == words[1]);
         let only = matches.next()?;
         matches.next().is_none().then(|| only.clone())
+    }
+
+    /// فحص ملفات «مكررات للمراجعة»: التوأم يُفحص لحظة الطلب — بالحجم ثم البصمة
+    /// ثم مقارنة بايتًا ببايت. لا يُنقل شيء هنا ولا يُحذف.
+    pub fn scan_review(source: &Path) -> DuplicateScan {
+        let review = source.join(DUPLICATES_FOLDER);
+        let journal = source.join(JOURNAL_DIR);
+        let mut outside: HashMap<u64, Vec<PathBuf>> = HashMap::new();
+        let mut review_files: Vec<PathBuf> = Vec::new();
+        for entry in WalkDir::new(source).into_iter().filter_map(|e| e.ok()).filter(|e| e.file_type().is_file()) {
+            let path = entry.into_path();
+            if path.starts_with(&journal) {
+                continue;
+            }
+            if path.starts_with(&review) {
+                review_files.push(path);
+            } else if let Ok(meta) = fs::metadata(&path) {
+                if meta.len() > 0 {
+                    outside.entry(meta.len()).or_default().push(path);
+                }
+            }
+        }
+        let mut scan = DuplicateScan { movable: Vec::new(), orphans: Vec::new(), size: 0 };
+        for file in review_files {
+            let len = fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+            // ponytail: الملف الفارغ لا يُنقل إلى السلة — لا محتوى يُقارن
+            let twin = (len > 0).then(|| Self::digest(&file)).flatten().is_some_and(|mine| {
+                outside
+                    .get(&len)
+                    .is_some_and(|candidates| candidates.iter().any(|c| Self::digest(c) == Some(mine) && Self::same_bytes(&file, c)))
+            });
+            if twin {
+                scan.size += len;
+                scan.movable.push(file);
+            } else {
+                scan.orphans.push(file);
+            }
+        }
+        scan
+    }
+
+    /// نقل الملفات إلى سلة المحذوفات (قابلة للاسترجاع). لا حذف نهائي في البرنامج.
+    pub fn trash_files(files: &[PathBuf]) -> Result<usize, String> {
+        let mut moved = 0;
+        for file in files {
+            trash::delete(file).map_err(|e| format!("{} — {e}", file.display()))?;
+            moved += 1;
+        }
+        Ok(moved)
     }
 
     fn move_file(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -2265,6 +2324,37 @@ trailer
             "عمرو دياب/عمرو دياب - وياه.mp3",
         ], "{files:?}");
         fs::remove_dir_all(&parent).unwrap();
+    }
+
+    /// الإصلاح 5: لا يُعرض للنقل إلى السلة إلا ملف له توأم مطابق بايتًا ببايت خارج المراجعة.
+    #[test]
+    fn only_duplicates_with_a_twin_outside_are_offered_for_the_bin() {
+        let root = temp_tree("scan_review", &[]);
+        let review = root.join(DUPLICATES_FOLDER);
+        fs::create_dir_all(&review).unwrap();
+        // له توأم مطابق خارج المجلد
+        fs::write(review.join("مكرر.txt"), b"same-bytes").unwrap();
+        fs::write(root.join("الأصل.txt"), b"same-bytes").unwrap();
+        // بلا توأم: لا أصل لها
+        fs::write(review.join("يتيم.txt"), b"lonely---").unwrap();
+        // نفس الحجم ومحتوى مختلف: ليست نسخة
+        fs::write(review.join("شبيه.txt"), b"abcdefghij").unwrap();
+        fs::write(root.join("غير مطابق.txt"), b"0123456789").unwrap();
+
+        let scan = OrganizerEngine::scan_review(&root);
+
+        assert_eq!(scan.movable, vec![review.join("مكرر.txt")]);
+        assert_eq!(scan.size, 10);
+        let mut orphans: Vec<String> = scan
+            .orphans
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        orphans.sort();
+        assert_eq!(orphans, vec!["شبيه.txt".to_string(), "يتيم.txt".to_string()]);
+        // الملف الأصلي خارج المراجعة لا يُمس
+        assert!(root.join("الأصل.txt").exists() && root.join("غير مطابق.txt").exists());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     /// الإصلاح 4: «الشيخ الكملي» يُضم إلى مجلد «سعيد الكملي» الموجود (آخر كلمة واحدة).

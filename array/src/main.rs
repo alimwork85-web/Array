@@ -276,6 +276,11 @@ struct ArrayApp {
     last_stats: Option<RunStats>,
     /// السمة المطبّقة حالياً (None قبل أول إطار)
     dark: Option<bool>,
+    /// فحص «مكررات للمراجعة» لزر النقل إلى سلة المحذوفات
+    review_scan: Option<organizer::DuplicateScan>,
+    /// مجلد العملية التي فُتح تأكيد نقل مكرراتها
+    trash_folder: Option<PathBuf>,
+    confirm_trash: bool,
 }
 
 fn ready_message() -> String {
@@ -309,6 +314,9 @@ impl ArrayApp {
             show_all: false,
             last_stats: None,
             dark: None,
+            review_scan: None,
+            trash_folder: None,
+            confirm_trash: false,
         };
         app.refresh_undo();
         app
@@ -819,6 +827,37 @@ impl ArrayApp {
                         tr("stayed: their category is switched off.", "بقيت: فئتها موقوفة.")
                     );
                     ui.label(theme::muted(rtl::for_display(&note)));
+                }
+            }
+            // مكررات «مكررات للمراجعة»: تُعرض للتخلص منها فقط إن كان لكل واحدة توأم خارجها
+            if outcome.folder.join(organizer::DUPLICATES_FOLDER).is_dir() {
+                if self.review_scan.is_none() {
+                    self.review_scan = Some(OrganizerEngine::scan_review(&outcome.folder));
+                }
+                if let Some(scan) = &self.review_scan {
+                    if !scan.orphans.is_empty() {
+                        ui.add_space(8.0);
+                        let note = format!(
+                            "{} — {}",
+                            count(scan.orphans.len(), Noun::File),
+                            tr("no original outside — left untouched", "لا أصل لها — لم تُلمس")
+                        );
+                        ui.label(theme::muted(rtl::for_display(&note)));
+                    }
+                    if !scan.movable.is_empty() {
+                        ui.add_space(8.0);
+                        let label = if ar() {
+                            format!("انقل {} من المكررات ({}) إلى سلة المحذوفات", scan.movable.len(), size_label(scan.size))
+                        } else {
+                            format!("Move {} duplicates ({}) to the Recycle Bin", scan.movable.len(), size_label(scan.size))
+                        };
+                        if theme::button(ui, Kind::Secondary, Some(Icon::Document), &label, true).clicked() {
+                            // الفحص لحظة الضغط لا من نتيجة سابقة
+                            self.review_scan = Some(OrganizerEngine::scan_review(&outcome.folder));
+                            self.trash_folder = Some(outcome.folder.clone());
+                            self.confirm_trash = true;
+                        }
+                    }
                 }
             }
             for line in outcome.message.lines().skip(1) {
@@ -1373,6 +1412,60 @@ impl ArrayApp {
                 None => {}
             }
         }
+        if self.confirm_trash {
+            let (n, size) = self.review_scan.as_ref().map(|s| (s.movable.len(), s.size)).unwrap_or((0, 0));
+            let body = if ar() {
+                format!("هل تريد نقل {n} من المكررات ({}) إلى سلة المحذوفات؟", size_label(size))
+            } else {
+                format!("Move {n} duplicates ({}) to the Recycle Bin?", size_label(size))
+            };
+            let note = tr(
+                "You can restore them from the Recycle Bin. Files with no original outside the review folder are not touched.",
+                "يمكنك استرجاعها من سلة المحذوفات. الملفات التي لا أصل لها خارج مجلد المراجعة لا تُلمس.",
+            );
+            match self.dialog(ctx, "trash", tr("Move duplicates to the Recycle Bin", "نقل المكررات إلى سلة المحذوفات"), &body, note) {
+                Some(true) => {
+                    self.confirm_trash = false;
+                    self.trash_review_duplicates();
+                }
+                Some(false) => self.confirm_trash = false,
+                None => {}
+            }
+        }
+    }
+
+    /// نقل مكررات المراجعة إلى السلة: يُعاد الفحص لحظة التنفيذ، ولا يُنقل إلا ما له توأم
+    fn trash_review_duplicates(&mut self) {
+        let Some(folder) = self.trash_folder.clone() else { return };
+        let scan = OrganizerEngine::scan_review(&folder);
+        let available = scan.movable.len();
+        if available == 0 {
+            self.review_scan = None;
+            self.status_message = tr("Nothing to move: no duplicate has an original outside the review folder.", "لا شيء يُنقل: لا توأم لأي مكرر خارج مجلد المراجعة.").to_string();
+            return;
+        }
+        self.review_scan = None;
+        self.status_message = match OrganizerEngine::trash_files(&scan.movable) {
+            Ok(n) => {
+                if ar() {
+                    format!("نُقل {n} إلى سلة المحذوفات — يمكنك استرجاعها من السلة.")
+                } else {
+                    format!("{n} moved to the Recycle Bin — you can restore them from there.")
+                }
+            }
+            Err(err) => format!("⚠ {err}"),
+        };
+    }
+}
+
+/// حجم مقروء بالأرقام الغربية دائماً: "12.3 MB"
+fn size_label(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
     }
 }
 

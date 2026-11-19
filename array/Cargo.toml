@@ -23,6 +23,7 @@ chrono = "0.4"
 kamadak-exif = "0.5"
 # عنوان المستند الداخلي في DOCX وXLSX وPPTX (المرحلة 2): قراءة docProps/core.xml من ملف ZIP
 zip = "2"
+trash = "5.4.0"
 
 [build-dependencies]
 winres = "0.1"
