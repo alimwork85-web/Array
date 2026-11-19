@@ -89,6 +89,8 @@ enum Job {
         total: usize,
         folder: PathBuf,
     },
+    /// نقل مكررات المراجعة إلى السلة: الفحص والنقل في الخلفية
+    Trashing(Receiver<Result<String, String>>),
 }
 
 fn spawn_job<T: Send + 'static>(ctx: &egui::Context, work: impl FnOnce() -> T + Send + 'static) -> Receiver<T> {
@@ -278,6 +280,10 @@ struct ArrayApp {
     dark: Option<bool>,
     /// فحص «مكررات للمراجعة» لزر النقل إلى سلة المحذوفات
     review_scan: Option<organizer::DuplicateScan>,
+    /// مجلد الفحص الحالي: فحص مجلد سابق لا يُعرض على نتيجة مجلد آخر
+    review_scan_for: Option<PathBuf>,
+    /// فحص جارٍ في الخلفية (المجلد، مستقبِل النتيجة)
+    review_job: Option<(PathBuf, Receiver<Result<organizer::DuplicateScan, String>>)>,
     /// مجلد العملية التي فُتح تأكيد نقل مكرراتها
     trash_folder: Option<PathBuf>,
     confirm_trash: bool,
@@ -315,6 +321,8 @@ impl ArrayApp {
             last_stats: None,
             dark: None,
             review_scan: None,
+            review_scan_for: None,
+            review_job: None,
             trash_folder: None,
             confirm_trash: false,
         };
@@ -389,6 +397,16 @@ impl ArrayApp {
                     self.outcome = Some(Outcome { message: err, folder, ok: false });
                 }
             },
+            Job::Trashing(rx) => match poll(rx) {
+                None => return,
+                Some(Ok(msg)) => {
+                    self.status_message = msg;
+                    // المكررات تغيّرت: الفحص السابق لم يبق صحيحًا
+                    self.review_scan = None;
+                    self.review_scan_for = None;
+                }
+                Some(Err(err)) => self.status_message = format!("❌ {}", err),
+            },
             Job::Moving { rx, folder, .. } => {
                 let folder = folder.clone();
                 match poll(rx) {
@@ -406,6 +424,46 @@ impl ArrayApp {
         }
         self.job = None;
         self.refresh_undo();
+    }
+
+    /// فحص «مكررات للمراجعة» في الخلفية: على خيط الواجهة يجمّد النافذة (~0.2s لكل 600 ملف)
+    fn request_review_scan(&mut self, ctx: &egui::Context, folder: &Path) {
+        // جارٍ لهذا المجلد أو منجز له: لا فحص جديد في كل إطار
+        if self.review_job.as_ref().is_some_and(|(f, _)| f == folder) {
+            return;
+        }
+        if self.review_scan_for.as_deref() == Some(folder) && self.review_scan.is_some() {
+            return;
+        }
+        let scan_dir = folder.to_path_buf();
+        let rx = spawn_job(ctx, move || Ok(OrganizerEngine::scan_review(&scan_dir)));
+        self.review_job = Some((folder.to_path_buf(), rx));
+    }
+
+    fn poll_review_scan(&mut self) {
+        let Some((folder, rx)) = &self.review_job else { return };
+        let Some(result) = poll(rx) else { return };
+        let folder = folder.clone();
+        self.review_job = None;
+        match result {
+            Ok(scan) => {
+                self.review_scan = Some(scan);
+                self.review_scan_for = Some(folder);
+            }
+            Err(err) => {
+                self.review_scan = None;
+                self.review_scan_for = Some(folder);
+                self.status_message = format!("⚠ {}", err);
+            }
+        }
+    }
+
+    /// الفحص الجاهز لهذا المجلد فقط
+    fn review_scan_of(&self, folder: &Path) -> Option<&organizer::DuplicateScan> {
+        if self.review_scan_for.as_deref() != Some(folder) {
+            return None;
+        }
+        self.review_scan.as_ref()
     }
 
     /// قراءة الإعدادات من جديد لأن المستخدم قد يكون عدّلها في Notepad
@@ -831,10 +889,9 @@ impl ArrayApp {
             }
             // مكررات «مكررات للمراجعة»: تُعرض للتخلص منها فقط إن كان لكل واحدة توأم خارجها
             if outcome.folder.join(organizer::DUPLICATES_FOLDER).is_dir() {
-                if self.review_scan.is_none() {
-                    self.review_scan = Some(OrganizerEngine::scan_review(&outcome.folder));
-                }
-                if let Some(scan) = &self.review_scan {
+                // الفحص في الخلفية: تظهر البطاقة فورًا ويأتي زر السلة في إطار لاحق
+                self.request_review_scan(ui.ctx(), &outcome.folder);
+                if let Some(scan) = self.review_scan_of(&outcome.folder) {
                     if !scan.orphans.is_empty() {
                         ui.add_space(8.0);
                         let note = format!(
@@ -853,8 +910,7 @@ impl ArrayApp {
                             format!("Move {n} duplicate{} ({}) to the Recycle Bin", if n == 1 { "" } else { "s" }, size_label(scan.size))
                         };
                         if theme::button(ui, Kind::Secondary, Some(Icon::Document), &label, true).clicked() {
-                            // الفحص لحظة الضغط لا من نتيجة سابقة
-                            self.review_scan = Some(OrganizerEngine::scan_review(&outcome.folder));
+                            // يُعاد الفحص في الخلفية لحظة التنفيذ، لا هنا على خيط الواجهة
                             self.trash_folder = Some(outcome.folder.clone());
                             self.confirm_trash = true;
                         }
@@ -898,6 +954,12 @@ impl ArrayApp {
                 theme::row(ui, |ui| {
                     icons::spinner(ui, 22.0, p.accent);
                     ui.label(theme::strong(t("Scanning files…", "جارٍ فحص الملفات…"), 17.0));
+                });
+            }
+            Some(Job::Trashing(..)) => {
+                theme::row(ui, |ui| {
+                    icons::spinner(ui, 22.0, p.accent);
+                    ui.label(theme::strong(t("Moving duplicates to the Recycle Bin…", "جارٍ نقل المكررات إلى سلة المحذوفات…"), 17.0));
                 });
             }
             Some(Job::Moving { restoring, progress, total, .. }) => {
@@ -1414,7 +1476,12 @@ impl ArrayApp {
             }
         }
         if self.confirm_trash {
-            let (n, size) = self.review_scan.as_ref().map(|s| (s.movable.len(), s.size)).unwrap_or((0, 0));
+            let (n, size) = self
+                .trash_folder
+                .as_deref()
+                .and_then(|f| self.review_scan_of(f))
+                .map(|s| (s.movable.len(), s.size))
+                .unwrap_or((0, 0));
             let body = if ar() {
                 format!("هل تريد نقل {n} من المكررات ({}) إلى سلة المحذوفات؟", size_label(size))
             } else {
@@ -1427,7 +1494,7 @@ impl ArrayApp {
             match self.dialog(ctx, "trash", tr("Move duplicates to the Recycle Bin", "نقل المكررات إلى سلة المحذوفات"), &body, note) {
                 Some(true) => {
                     self.confirm_trash = false;
-                    self.trash_review_duplicates();
+                    self.trash_review_duplicates(ctx);
                 }
                 Some(false) => self.confirm_trash = false,
                 None => {}
@@ -1435,35 +1502,44 @@ impl ArrayApp {
         }
     }
 
-    /// نقل مكررات المراجعة إلى السلة: يُعاد الفحص لحظة التنفيذ، ولا يُنقل إلا ما له توأم
-    fn trash_review_duplicates(&mut self) {
+    /// نقل مكررات المراجعة إلى السلة: الفحص والنقل في الخلفية، فلا تتجمد النافذة
+    fn trash_review_duplicates(&mut self, ctx: &egui::Context) {
         let Some(folder) = self.trash_folder.clone() else { return };
-        let scan = OrganizerEngine::scan_review(&folder);
-        let available = scan.movable.len();
-        if available == 0 {
-            self.review_scan = None;
-            self.status_message = tr("Nothing to move: no duplicate has an original outside the review folder.", "لا شيء يُنقل: لا توأم لأي مكرر خارج مجلد المراجعة.").to_string();
-            return;
-        }
         self.review_scan = None;
-        let (moved, error) = OrganizerEngine::trash_files(&scan.movable);
-        self.status_message = match (moved, error) {
-            (n, None) => {
-                if ar() {
-                    format!("نُقل {n} إلى سلة المحذوفات — يمكنك استرجاعها من السلة.")
-                } else {
-                    format!("{n} moved to the Recycle Bin — you can restore them from there.")
-                }
+        self.review_scan_for = None;
+        self.status_message = format!(
+            "⏳ {}", tr("Moving duplicates to the Recycle Bin…", "جارٍ نقل المكررات إلى سلة المحذوفات…")
+        );
+        let rx = spawn_job(ctx, move || {
+            // الفحص لحظة التنفيذ لا من نتيجة سابقة، ولا يُنقل إلا ما له توأم
+            let scan = OrganizerEngine::scan_review(&folder);
+            if scan.movable.is_empty() {
+                return Ok(tr(
+                    "Nothing to move: no duplicate has an original outside the review folder.",
+                    "لا شيء يُنقل: لا توأم لأي مكرر خارج مجلد المراجعة.",
+                )
+                .to_string());
             }
-            (0, Some(err)) => format!("⚠ {err}"),
-            (n, Some(err)) => {
-                if ar() {
-                    format!("نُقل {n} إلى السلة، وفشل الباقي: {err}")
-                } else {
-                    format!("Moved {n} to the Recycle Bin; the rest failed: {err}")
+            let (moved, error) = OrganizerEngine::trash_files(&scan.movable);
+            Ok(match (moved, error) {
+                (n, None) => {
+                    if ar() {
+                        format!("نُقل {n} إلى سلة المحذوفات — يمكنك استرجاعها من السلة.")
+                    } else {
+                        format!("{n} moved to the Recycle Bin — you can restore them from there.")
+                    }
                 }
-            }
-        };
+                (0, Some(err)) => format!("⚠ {err}"),
+                (n, Some(err)) => {
+                    if ar() {
+                        format!("نُقل {n} إلى السلة، وفشل الباقي: {err}")
+                    } else {
+                        format!("Moved {n} to the Recycle Bin; the rest failed: {err}")
+                    }
+                }
+            })
+        });
+        self.job = Some(Job::Trashing(rx));
     }
 }
 
@@ -1704,6 +1780,7 @@ impl eframe::App for ArrayApp {
         let p = pal();
 
         self.poll_job();
+        self.poll_review_scan();
         if self.job.is_some() {
             // تحديث شريط التقدم أثناء العمل
             ctx.request_repaint_after(Duration::from_millis(100));
@@ -1824,6 +1901,69 @@ mod tests {
         assert_eq!(app.outcome.as_ref().map(|o| o.ok), Some(true), "{}", app.status_message);
         assert_eq!(tree(&root), before, "التراجع لم يعيد الشجرة كما كانت");
         assert_eq!(app.undo_count, None, "زر التراجع بقي بعد نجاحه");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// فحص «مكررات للمراجعة» يجري في الخلفية: النتيجة تصل عبر poll_review_scan،
+    /// وفحص مجلد لا يُعرض على مجلد آخر، ولا يُعاد فحص مجلد منجز
+    #[test]
+    fn review_scan_runs_off_the_ui_thread() {
+        let root = temp_tree("review_bg", &[]);
+        let review = root.join(organizer::DUPLICATES_FOLDER);
+        fs::create_dir_all(&review).unwrap();
+        fs::write(review.join("dup.txt"), b"same").unwrap();
+        fs::write(review.join("alone.txt"), b"unique").unwrap();
+        fs::write(root.join("original.txt"), b"same").unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = ArrayApp::new(&ctx, Storage::at(temp_tree("review_bg_appdata", &[])));
+        app.request_review_scan(&ctx, &root);
+        assert!(app.review_job.is_some(), "لم يبدأ الفحص في الخلفية");
+        for _ in 0..300 {
+            app.poll_review_scan();
+            if app.review_job.is_none() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let scan = app.review_scan_of(&root).expect("لم يصل الفحص");
+        assert_eq!(scan.movable.len(), 1, "{:?}", scan.movable);
+        assert_eq!(scan.orphans.len(), 1, "{:?}", scan.orphans);
+
+        assert!(app.review_scan_of(&root.join("elsewhere")).is_none(), "فحص مجلد آخر عُرض خطأً");
+        app.request_review_scan(&ctx, &root);
+        assert!(app.review_job.is_none(), "أُعيد فحص مجلد منجز بلا داعٍ");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// زر السلة يعمل كعمل خلفي: الفحص يجد لا شيء فيُبلَّغ بلا نقل وبلا تجميد
+    #[test]
+    fn trash_job_reports_when_nothing_is_movable() {
+        let root = temp_tree("trash_none", &[]);
+        let review = root.join(organizer::DUPLICATES_FOLDER);
+        fs::create_dir_all(&review).unwrap();
+        // ملف بلا توأم خارج المراجعة: لا يُنقل أبدًا
+        fs::write(review.join("alone.txt"), b"unique").unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = ArrayApp::new(&ctx, Storage::at(temp_tree("trash_none_appdata", &[])));
+        app.trash_folder = Some(root.clone());
+        app.trash_review_duplicates(&ctx);
+        assert!(matches!(app.job, Some(Job::Trashing(..))), "لم يبدأ عمل السلة في الخلفية");
+        for _ in 0..300 {
+            app.poll_job();
+            if app.job.is_none() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(app.job.is_none(), "لم ينتهِ عمل السلة");
+        assert!(
+            app.status_message.contains("لا شيء") || app.status_message.contains("Nothing to move"),
+            "رسالة غير متوقعة: {}",
+            app.status_message
+        );
+        assert!(review.join("alone.txt").exists(), "مُس ملف بلا توأم");
         fs::remove_dir_all(&root).unwrap();
     }
 
