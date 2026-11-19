@@ -849,7 +849,8 @@ impl ArrayApp {
                         let label = if ar() {
                             format!("انقل {} من المكررات ({}) إلى سلة المحذوفات", scan.movable.len(), size_label(scan.size))
                         } else {
-                            format!("Move {} duplicates ({}) to the Recycle Bin", scan.movable.len(), size_label(scan.size))
+                            let n = scan.movable.len();
+                            format!("Move {n} duplicate{} ({}) to the Recycle Bin", if n == 1 { "" } else { "s" }, size_label(scan.size))
                         };
                         if theme::button(ui, Kind::Secondary, Some(Icon::Document), &label, true).clicked() {
                             // الفحص لحظة الضغط لا من نتيجة سابقة
@@ -1417,7 +1418,7 @@ impl ArrayApp {
             let body = if ar() {
                 format!("هل تريد نقل {n} من المكررات ({}) إلى سلة المحذوفات؟", size_label(size))
             } else {
-                format!("Move {n} duplicates ({}) to the Recycle Bin?", size_label(size))
+                format!("Move {n} duplicate{} ({}) to the Recycle Bin?", if n == 1 { "" } else { "s" }, size_label(size))
             };
             let note = tr(
                 "You can restore them from the Recycle Bin. Files with no original outside the review folder are not touched.",
@@ -1458,15 +1459,17 @@ impl ArrayApp {
     }
 }
 
-/// حجم مقروء بالأرقام الغربية دائماً: "12.3 MB"
+/// حجم مقروء بالأرقام الغربية دائماً: "12.3 MB"، ومعزول الاتجاه حتى لا يقلبه
+/// النص العربي إلى "MB 12.3"
 fn size_label(bytes: u64) -> String {
-    if bytes >= 1024 * 1024 {
+    let text = if bytes >= 1024 * 1024 {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     } else if bytes >= 1024 {
         format!("{:.1} KB", bytes as f64 / 1024.0)
     } else {
         format!("{bytes} B")
-    }
+    };
+    format!("\u{2066}{text}\u{2069}")
 }
 
 /// أيقونة مجلد الوجهة في المعاينة حسب نوعه
