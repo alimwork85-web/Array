@@ -2880,7 +2880,7 @@ trailer
         GoldenName { file: "studio lo/studio lo - 2026-09-12 23-31 - 0m07s.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
         GoldenName { file: "misc/20250606 162959 IMG 2054.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
         GoldenName { file: "misc/20250607 130354 IMG 2060.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
-        GoldenName { file: "misc/تسجيل صوتي - 2026-09-12 23-35 - 1h10m05s.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
+        GoldenName { file: "misc/تسجيل صوتي - 2026-09-12 23-35 - 1h10m05s.mp3", kind: Kind::Audio, junk: false, group: REC, new_name: Some("2026-09-12 23-35 تسجيل صوتي") },
         GoldenName { file: "misc/آن الخشوع - ÃÏÇÁ æÃáÍÇä ÝáÇä ÇáÝáÇäí.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
         GoldenName { file: "misc/هي فعلاً غريبة !!.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
         GoldenName { file: "misc/XD نص تجريبي.mp3", kind: Kind::Audio, junk: false, group: None, new_name: None },
