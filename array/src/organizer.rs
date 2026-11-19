@@ -665,6 +665,16 @@ impl OrganizerEngine {
         let assignments = grouping::assign(&tracks, &existing_music_dirs);
         let misc_dir = music_dir.join(grouping::misc_folder_name(&existing_music_dirs));
         let ai_dir = music_dir.join(grouping::ai_folder_name(&existing_music_dirs));
+        // مجلدات البرنامج (منوعات، ذكاء اصطناعي، تسجيلات) ليست تنظيماً للمستخدم إذا كان
+        // البرنامج قد نظّم هذا الجذر من قبل (يوجد `.array`)؛ وإلا فهي مجلدات أنشأها المستخدم
+        let program_dirs: Vec<PathBuf> = if source_path.join(JOURNAL_DIR).exists() {
+            [misc_dir.clone(), ai_dir.clone(), category_dirs["Recordings"].clone()]
+                .into_iter()
+                .filter(|d| d != source_path)
+                .collect()
+        } else {
+            Vec::new()
+        };
         // مجلدات المستخدم الموجودة لا تُلمس: ملفاتها تبقى كما هي بالاسم والمكان
         let kept = |path: &Path| -> bool {
             let Ok(relative) = path.strip_prefix(source_path) else { return false };
@@ -677,6 +687,7 @@ impl OrganizerEngine {
             inside_subfolder
                 && !matches!(first.as_deref(), Some("single tracks" | "unknown" | "array_organized"))
                 && first.as_deref() != Some(DUPLICATES_FOLDER)
+                && !program_dirs.iter().any(|d| path.starts_with(d))
         };
         // معلومات كل ملف (فئة ومجموعة تسمية) لبناء بطاقات الملخص بعد حساب النقل
         let info_by_path: HashMap<PathBuf, (String, Option<NamingGroup>)> = raw_files
@@ -2190,6 +2201,50 @@ trailer
         assert!(files.contains(&format!("{DUPLICATES_FOLDER}/عقد (1).txt")), "{files:?}");
         assert!(files.contains(&"مستندات/نصوص/عقد.txt".to_string()), "{files:?}");
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// الإصلاح 2: جذر نظّمه البرنامج من قبل (فيه `.array`) — ملف في «منوعات» ليس تنظيماً
+    /// للمستخدم، فينتقل إلى مجلد فنانِه.
+    #[test]
+    fn a_misc_folder_made_by_the_program_is_not_a_user_folder() {
+        let parent = temp_tree("misc_program", &[]);
+        let root = parent.join("موسيقى");
+        fs::create_dir_all(root.join(JOURNAL_DIR)).unwrap();
+        fs::create_dir_all(root.join("منوعات")).unwrap();
+        for name in ["عمرو دياب - تملي معاك.mp3", "عمرو دياب - نور العين.mp3", "عمرو دياب - وياه.mp3"] {
+            fs::write(root.join("منوعات").join(name), b"").unwrap();
+        }
+
+        organize(&root, &Options::default());
+
+        let files = tree(&root);
+        assert_eq!(files, vec![
+            "عمرو دياب/عمرو دياب - تملي معاك.mp3",
+            "عمرو دياب/عمرو دياب - نور العين.mp3",
+            "عمرو دياب/عمرو دياب - وياه.mp3",
+        ], "{files:?}");
+        fs::remove_dir_all(&parent).unwrap();
+    }
+
+    /// الإصلاح 2: جذر بلا `.array` — مجلد «منوعات» أنشأه المستخدم ولا يُلمس.
+    #[test]
+    fn a_misc_folder_without_a_journal_belongs_to_the_user() {
+        let parent = temp_tree("misc_user", &[]);
+        let root = parent.join("موسيقى");
+        fs::create_dir_all(root.join("منوعات")).unwrap();
+        for name in ["عمرو دياب - تملي معاك.mp3", "عمرو دياب - نور العين.mp3", "عمرو دياب - وياه.mp3"] {
+            fs::write(root.join("منوعات").join(name), b"").unwrap();
+        }
+
+        organize(&root, &Options::default());
+
+        let files = tree(&root);
+        assert_eq!(files, vec![
+            "منوعات/عمرو دياب - تملي معاك.mp3",
+            "منوعات/عمرو دياب - نور العين.mp3",
+            "منوعات/عمرو دياب - وياه.mp3",
+        ], "{files:?}");
+        fs::remove_dir_all(&parent).unwrap();
     }
 
     #[test]
