@@ -1869,6 +1869,25 @@ impl eframe::App for ArrayApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(p.bg).inner_margin(egui::Margin::symmetric(32.0, 24.0)))
             .show(ctx, |ui| {
+                // عند تغيّر الصفحة: تظهر الجديدة بتلاشٍ وصعود 8px خلال 200ms (فوري إذا أُغلقت الحركة في ويندوز)
+                let now = ctx.input(|i| i.time);
+                let key = egui::Id::new("page-shown");
+                let page = self.page as u8;
+                let start = ctx.memory_mut(|m| {
+                    let slot = m.data.get_temp_mut_or_insert_with(key, || (page, f64::MIN));
+                    if slot.0 != page {
+                        *slot = (page, now);
+                    }
+                    slot.1
+                });
+                let duration = if ctx.style().animation_time > 0.0 { 0.2 } else { 0.0 };
+                let t = if duration > 0.0 { ((now - start) / duration).clamp(0.0, 1.0) as f32 } else { 1.0 };
+                let t = 1.0 - (1.0 - t).powi(3);
+                if t < 1.0 {
+                    ctx.request_repaint();
+                    ui.set_opacity(t);
+                    ui.add_space(8.0 * (1.0 - t));
+                }
                 theme::column(ui, |ui| match self.page {
                     Page::Organize => self.organize_page(ui, ctx),
                     Page::History => self.history_page(ui),
