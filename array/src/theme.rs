@@ -496,6 +496,61 @@ pub fn chip(ui: &mut egui::Ui, icon: Icon, text: &str) {
     ui.painter().galley(egui::pos2(text_x, rect.center().y - galley.size().y / 2.0), galley, p.text);
 }
 
+/// عرض شارة بنصها كما تُرسم
+pub fn chip_width(ui: &egui::Ui, text: &str) -> f32 {
+    ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(13.0), pal().text).size().x + 44.0
+}
+
+/// شارات في سطور: كل سطر يبدأ من بداية السطر، ولا يبقى في آخره شارة واحدة
+pub fn chip_grid(ui: &mut egui::Ui, chips: &[(Icon, String)]) {
+    let gap = ui.spacing().item_spacing.x;
+    let widths: Vec<f32> = chips.iter().map(|(_, text)| chip_width(ui, text)).collect();
+    for row in balanced_rows(&widths, gap, ui.available_width()) {
+        theme_row_chips(ui, &row, chips, gap);
+    }
+}
+
+fn theme_row_chips(ui: &mut egui::Ui, indices: &[usize], chips: &[(Icon, String)], gap: f32) {
+    row(ui, |ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        for &i in indices {
+            let (icon, text) = &chips[i];
+            chip(ui, *icon, text);
+        }
+    });
+}
+
+/// حزم العروض في سطور بترتيبها، ثم نقل شارة من السطر السابق إن بقي سطر أخير بشارة واحدة
+fn balanced_rows(widths: &[f32], gap: f32, avail: f32) -> Vec<Vec<usize>> {
+    let width_of = |row: &Vec<usize>| row.iter().map(|&i| widths[i]).sum::<f32>() + gap * (row.len() as f32 - 1.0);
+    let mut rows: Vec<Vec<usize>> = Vec::new();
+    let mut used = 0.0;
+    for (i, w) in widths.iter().enumerate() {
+        if let Some(row) = rows.last_mut() {
+            if used + gap + w <= avail {
+                used += gap + w;
+                row.push(i);
+                continue;
+            }
+        }
+        rows.push(vec![i]);
+        used = *w;
+    }
+    while rows.len() >= 2 {
+        let last = rows.len() - 1;
+        if rows[last].len() != 1 || rows[last - 1].len() < 2 {
+            break;
+        }
+        let moved = rows[last - 1].pop().expect("row is not empty");
+        rows[last].insert(0, moved);
+        if width_of(&rows[last]) > avail {
+            rows[last - 1].push(moved);
+            break;
+        }
+    }
+    rows
+}
+
 /// اختيار من عدة خيارات متجاورة (مثل: System / Light / Dark)، الأول عند بداية السطر
 pub fn segmented(ui: &mut egui::Ui, options: &[&str], selected: &mut usize) -> bool {
     let p = pal();
@@ -587,5 +642,19 @@ mod tests {
         let half = sample(0.2);
         assert!(half > 50.0 && half < 100.0, "half = {half}");
         assert_eq!(sample(1.0), 100.0);
+    }
+
+    /// الشارات: لا يبقى سطر أخير بشارة واحدة، والترتيب محفوظ
+    #[test]
+    fn chip_rows_never_leave_a_single_widow() {
+        let widths = [100.0, 100.0, 100.0, 100.0, 100.0];
+        let rows = balanced_rows(&widths, 10.0, 450.0);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], vec![0, 1, 2]);
+        assert_eq!(rows[1], vec![3, 4]);
+
+        // سطر واحد يتّسع لكل الشارات: لا تغيير
+        let rows = balanced_rows(&widths, 10.0, 1000.0);
+        assert_eq!(rows, vec![vec![0, 1, 2, 3, 4]]);
     }
 }

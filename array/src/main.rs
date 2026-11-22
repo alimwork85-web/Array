@@ -1038,25 +1038,21 @@ impl ArrayApp {
         }
 
         // إلى أين تذهب الملفات
-        let wrap_layout = if ar() {
-            egui::Layout::right_to_left(egui::Align::Min).with_main_wrap(true)
-        } else {
-            egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true)
-        };
-        ui.with_layout(wrap_layout, |ui| {
-            for (folder, n, existing, artists) in &preview.destinations {
-                let name = if folder == THIS_FOLDER { tr("This folder", "هذا المجلد").to_string() } else { folder.clone() };
-                // الاسم معزول حتى لا يلتصق به الرقم بعده فيُقرأ اسم إنجليزي مع أرقامه بالمقلوب في العربية
-                let mut label = format!("\u{2068}{name}\u{2069}  ·  {n}");
-                if *artists > 0 {
-                    label.push_str(&format!("  ·  {} {}", count(*artists, Noun::Folder), tr("inside", "بالداخل")));
-                } else if !existing {
-                    label.push_str(&format!("  ·  {}", tr("new", "جديد")));
-                }
-                let shown = if ar() { rtl::rtl_line(&label) } else { rtl::for_display(&label.replace(['\u{2068}', '\u{2069}'], "")) };
-                theme::chip(ui, category_icon(folder), &shown);
+        let mut chips: Vec<(Icon, String)> = Vec::new();
+        for (folder, n, existing, artists) in &preview.destinations {
+            let name = if folder == THIS_FOLDER { tr("This folder", "هذا المجلد").to_string() } else { folder.clone() };
+            // الاسم معزول حتى لا يلتصق به الرقم بعده فيُقرأ اسم إنجليزي مع أرقامه بالمقلوب في العربية
+            let mut label = format!("\u{2068}{name}\u{2069}  ·  {n}");
+            if *artists > 0 {
+                label.push_str(&format!("  ·  {} {}", count(*artists, Noun::Folder), tr("inside", "بالداخل")));
+            } else if !existing {
+                label.push_str(&format!("  ·  {}", tr("new", "جديد")));
             }
-        });
+            let shown = if ar() { rtl::rtl_line(&label) } else { rtl::for_display(&label.replace(['\u{2068}', '\u{2069}'], "")) };
+            chips.push((category_icon(folder), shown));
+        }
+        // يُوزَّع على سطور فلا يبقى سطر أخير بشارة واحدة
+        theme::chip_grid(ui, &chips);
         ui.add_space(4.0);
         if !preview.skipped.is_empty() {
             let label = if ar() {
