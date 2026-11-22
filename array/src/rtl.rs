@@ -39,6 +39,7 @@ pub fn rtl_line(text: &str) -> String {
 pub fn wrap_lines(text: &str, max_width: f32, measure: impl Fn(&str) -> f32) -> Vec<String> {
     let mut lines = Vec::new();
     for paragraph in text.lines() {
+        let start = lines.len();
         let mut line = String::new();
         for word in paragraph.split_whitespace() {
             let candidate = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
@@ -47,6 +48,16 @@ pub fn wrap_lines(text: &str, max_width: f32, measure: impl Fn(&str) -> f32) -> 
                 line = word.to_string();
             } else {
                 line = candidate;
+            }
+        }
+        // لا يبقى آخر الفقرة كلمة وحدها: تنزل إليها الكلمة الأخيرة من السطر السابق إن اتسع لهما
+        if let Some(prev) = lines[start..].last_mut().filter(|_| !line.contains(' ')) {
+            if let Some((head, tail)) = prev.rsplit_once(' ') {
+                let joined = format!("{tail} {line}");
+                if measure(&joined) <= max_width {
+                    line = joined;
+                    prev.truncate(head.len());
+                }
             }
         }
         lines.push(line);
@@ -146,6 +157,18 @@ mod tests {
     fn wrapping_happens_in_reading_order() {
         let lines = wrap_lines("واحد اثنان ثلاثة أربعة", 12.0, |s| s.chars().count() as f32);
         assert_eq!(lines, ["واحد اثنان", "ثلاثة أربعة"]);
+    }
+
+    #[test]
+    fn last_line_never_holds_a_single_word() {
+        // بلا تصحيح: "أ بب جج" ثم "دد" وحدها
+        let lines = wrap_lines("أ بب جج دد", 7.0, |s| s.chars().count() as f32);
+        assert_eq!(lines, ["أ بب", "جج دد"]);
+        // كلمة واحدة في الفقرة كلها تبقى كما هي
+        assert_eq!(wrap_lines("كلمة", 2.0, |s| s.chars().count() as f32), ["كلمة"]);
+        // فقرة من كلمة واحدة لا تأخذ كلمة من الفقرة قبلها
+        assert_eq!(wrap_lines("أ بب
+جج", 7.0, |s| s.chars().count() as f32), ["أ بب", "جج"]);
     }
 
     #[test]
