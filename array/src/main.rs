@@ -1431,6 +1431,44 @@ impl ArrayApp {
     fn dialog(&mut self, ctx: &egui::Context, id: &str, title: &str, body: &str, note: &str) -> Option<bool> {
         let p = pal();
         let mut answer = None;
+
+        // بداية الظهور: تُحفظ عند أول إطار تُفتح فيه النافذة، وتُعاد إن غابت النافذة ولو إطاراً واحداً
+        let key = egui::Id::new(("dialog-open", id));
+        let (now, frame) = (ctx.input(|i| i.time), ctx.frame_nr());
+        let start = ctx.memory_mut(|m| {
+            let slot = m.data.get_temp_mut_or_insert_with(key, || (now, frame));
+            if slot.1 + 1 < frame {
+                slot.0 = now;
+            }
+            slot.1 = frame;
+            slot.0
+        });
+        // 180ms بمنحنى ease-out، وفوري إذا أُغلقت الحركة في ويندوز
+        let duration = if ctx.style().animation_time > 0.0 { 0.18 } else { 0.0 };
+        let t = if duration > 0.0 { ((now - start) / duration).clamp(0.0, 1.0) as f32 } else { 1.0 };
+        let t = 1.0 - (1.0 - t).powi(3);
+        if t < 1.0 {
+            ctx.request_repaint();
+        }
+
+        // خلفية معتمة تحت النافذة: تبرزها وتمنع الضغط على ما خلفها
+        let screen = ctx.screen_rect();
+        egui::Area::new(egui::Id::new(("dialog-scrim", id)))
+            .order(egui::Order::PanelResizeLine)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                ui.allocate_response(screen.size(), egui::Sense::click());
+                ui.painter().rect_filled(screen, 0.0, egui::Color32::from_black_alpha((102.0 * t) as u8));
+            });
+
+        // تكبير من 0.96 إلى 1 حول مركز الشاشة (النافذة في المركز)
+        let scale = 0.96 + 0.04 * t;
+        let center = screen.center().to_vec2();
+        ctx.set_transform_layer(
+            egui::LayerId::new(egui::Order::Middle, egui::Id::new(id)),
+            egui::emath::TSTransform::new(center * (1.0 - scale), scale),
+        );
+
         egui::Window::new(id)
             .title_bar(false)
             .collapsible(false)
