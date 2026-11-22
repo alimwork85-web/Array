@@ -301,13 +301,18 @@ pub fn button(ui: &mut egui::Ui, kind: Kind, icon: Option<Icon>, text: &str, ena
 
     let hovered = enabled && response.hovered();
     let pressed = enabled && response.is_pointer_button_down_on();
-    let (fill, fg, border) = match kind {
-        Kind::Primary if !enabled => (p.toggle_off, p.muted, Color32::TRANSPARENT),
-        Kind::Primary => (if hovered || pressed { p.primary_hover } else { p.primary }, Color32::WHITE, Color32::TRANSPARENT),
-        Kind::Secondary => (if pressed { p.selected } else if hovered { p.hover } else { p.chip }, if enabled { p.text } else { p.muted }, p.border),
-        Kind::Ghost => (if pressed { p.selected } else if hovered { p.hover } else { Color32::TRANSPARENT }, if enabled { p.text } else { p.muted }, Color32::TRANSPARENT),
+    // انتقال ناعم للون hover (200ms، أو فوري إذا كانت حركة النظام موقوفة)
+    let hover_time = if ui.style().animation_time > 0.0 { 0.2 } else { 0.0 };
+    let hover_t = ui.ctx().animate_bool_with_time(response.id, hovered || pressed, hover_time);
+    let (base, over, fg, border) = match kind {
+        Kind::Primary if !enabled => (p.toggle_off, p.toggle_off, p.muted, Color32::TRANSPARENT),
+        Kind::Primary => (p.primary, p.primary_hover, Color32::WHITE, Color32::TRANSPARENT),
+        Kind::Secondary => (p.chip, if pressed { p.selected } else { p.hover }, if enabled { p.text } else { p.muted }, p.border),
+        Kind::Ghost => (Color32::TRANSPARENT, if pressed { p.selected } else { p.hover }, if enabled { p.text } else { p.muted }, Color32::TRANSPARENT),
     };
-    let rect_drawn = if pressed { rect.shrink(1.0) } else { rect };
+    let fill = if enabled { lerp_color(base, over, hover_t) } else { base };
+    // الضغط يصغّر المرسوم إلى 0.97 حول المركز فقط؛ الحجم المحجوز لا يتغيّر
+    let rect_drawn = if pressed { egui::Rect::from_center_size(rect.center(), rect.size() * 0.97) } else { rect };
     ui.painter().rect(rect_drawn, 8.0, fill, Stroke::new(1.0_f32, border));
     if response.has_focus() {
         ui.painter().rect_stroke(rect.expand(2.0), 10.0, Stroke::new(2.0_f32, p.accent));
@@ -419,7 +424,8 @@ pub fn toggle_row(ui: &mut egui::Ui, enabled: bool, on: &mut bool, title: &str, 
 
 fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
-    Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
+    // مخلوط مسبق الضرب، فينتقل الشفاف إلى لون hover بلا وميض أسود (زر Ghost)
+    Color32::from_rgba_premultiplied(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()), mix(a.a(), b.a()))
 }
 
 /// حركة قيمة واحدة بمعرّف ثابت وبمنحنى ease-out: تبدأ من `first` عند أول ظهور،
@@ -656,5 +662,15 @@ mod tests {
         // سطر واحد يتّسع لكل الشارات: لا تغيير
         let rows = balanced_rows(&widths, 10.0, 1000.0);
         assert_eq!(rows, vec![vec![0, 1, 2, 3, 4]]);
+    }
+
+    /// انتقال hover: الشفاف يبقى شفافًا في أوله ولا يقفز إلى اللون دفعة واحدة
+    #[test]
+    fn hover_mix_respects_alpha() {
+        let hover = Color32::from_rgb(0x24, 0x30, 0x40);
+        assert_eq!(lerp_color(Color32::TRANSPARENT, hover, 0.0).a(), 0);
+        let mid = lerp_color(Color32::TRANSPARENT, hover, 0.5);
+        assert!(mid.a() > 0 && mid.a() < 255);
+        assert_eq!(lerp_color(Color32::RED, Color32::GREEN, 1.0), Color32::GREEN);
     }
 }
