@@ -1,6 +1,6 @@
 //! نظام التصميم: "مكتب مرتّب" — أداة هادئة ودقيقة، لون واحد للفعل الأساسي.
 //! الألوان من أيقونة التطبيق (فيروزي وكهرماني)، بسمتين فاتحة وداكنة، وكل قيمة في مكان واحد.
-//! الخط Segoe UI (موجود في ويندوز، فيعمل التطبيق بدون إنترنت) مع Tahoma للعربية.
+//! الخط IBM Plex Sans Arabic مضمّن في البرنامج (يعمل بدون إنترنت)، وSegoe UI وTahoma احتياط.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
@@ -110,17 +110,22 @@ pub fn install_fonts(ctx: &egui::Context) {
     let arabic = load("arabic", "tahoma.ttf");
     let arabic_bold = load("arabic-bold", "tahomabd.ttf");
 
+    // IBM Plex Sans Arabic مضمّن في البرنامج (رخصة OFL في assets/fonts): عائلة واحدة للعربي واللاتيني،
+    // ويأتي أولاً حتى لا يرسم Segoe UI الحروف العربية بخطه. Segoe وTahoma بعده احتياطاً
+    fonts.font_data.insert("plex".to_owned(), egui::FontData::from_static(include_bytes!("../assets/fonts/IBMPlexSansArabic-Regular.ttf")));
+    fonts.font_data.insert("plex-semibold".to_owned(), egui::FontData::from_static(include_bytes!("../assets/fonts/IBMPlexSansArabic-SemiBold.ttf")));
     let fallback: Vec<String> = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
-    let family = |main: Option<&str>, arabic: Option<&str>| -> Vec<String> {
-        main.into_iter().chain(arabic).map(str::to_owned).chain(fallback.iter().cloned()).collect()
+    let family = |lead: &str, main: Option<&str>, arabic: Option<&str>| -> Vec<String> {
+        std::iter::once(lead).chain(main).chain(arabic).map(str::to_owned).chain(fallback.iter().cloned()).collect()
     };
     fonts.families.insert(
         FontFamily::Proportional,
-        family(regular.then_some("segoe"), arabic.then_some("arabic")),
+        family("plex", regular.then_some("segoe"), arabic.then_some("arabic")),
     );
     fonts.families.insert(
         FontFamily::Name(SEMIBOLD.into()),
         family(
+            "plex-semibold",
             semibold.then_some("segoe-semibold").or(regular.then_some("segoe")),
             arabic_bold.then_some("arabic-bold").or(arabic.then_some("arabic")),
         ),
