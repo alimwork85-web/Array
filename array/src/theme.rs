@@ -433,7 +433,14 @@ pub fn stat(ui: &mut egui::Ui, width: f32, icon: Icon, value: usize, label: &str
             column(ui, |ui| {
                 row(ui, |ui| {
                     icons::show(ui, icon, 18.0, color);
-                    ui.label(strong(value.to_string(), 24.0).color(color));
+                    // الصفر بلون باهت بدل لونه، والرقم يشغل عرض خاناته دائمًا فلا يهتز أثناء العد
+                    let color = if value == 0 { p.muted } else { color };
+                    let font = FontId::new(24.0, FontFamily::Name(SEMIBOLD.into()));
+                    let cell = ui.painter().layout_no_wrap("0".repeat(value.to_string().len()), font.clone(), color).size().x;
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(cell, 28.0), egui::Sense::hover());
+                    let galley = ui.painter().layout_no_wrap(value.to_string(), font, color);
+                    let x = if ar() { rect.right() - galley.size().x } else { rect.left() };
+                    ui.painter().galley(egui::pos2(x, rect.center().y - galley.size().y / 2.0), galley, color);
                 });
                 ui.add(egui::Label::new(RichText::new(show(label)).small().color(p.muted)).truncate(!ar()));
             });
