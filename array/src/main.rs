@@ -1518,6 +1518,7 @@ impl ArrayApp {
             .collapsible(false)
             .resizable(false)
             .fixed_size([440.0, 0.0])
+            .frame(egui::Frame::window(&ctx.style()).inner_margin(egui::Margin::same(24.0)))
             // وسط النافذة كلها؛ anchor يوسّط داخل ما تتركه اللوحات فتنحرف النافذة بعيدًا عن الشريط الجانبي
             .pivot(egui::Align2::CENTER_CENTER)
             .fixed_pos(screen.center())
