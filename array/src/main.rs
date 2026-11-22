@@ -1695,8 +1695,10 @@ fn summary_cards(ui: &mut egui::Ui, plan: &Plan, options: &Options) -> (bool, Op
     let width = ((ui.available_width() - 70.0) / 2.0).max(230.0);
     {
         {
+            // البطاقتان تبدآن من أعلى السطر نفسه؛ theme::row يوسّط عموديًا فتنزل القصيرة
+            let top_row = if ar() { egui::Layout::right_to_left(egui::Align::Min) } else { egui::Layout::left_to_right(egui::Align::Min) };
             for pair in cards.chunks(2) {
-                theme::row(ui, |ui| {
+                ui.with_layout(top_row, |ui| {
                     for card in pair {
                         ui.allocate_ui_with_layout(
                             egui::vec2(width, 0.0),
