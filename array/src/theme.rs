@@ -419,6 +419,37 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
 }
 
+/// حركة قيمة واحدة بمعرّف ثابت وبمنحنى ease-out: تبدأ من `first` عند أول ظهور،
+/// وتعدّ من موضعها الحالي إذا تغيّر الهدف، وتصير فورية إذا كانت حركة النظام موقوفة
+/// (`animation_time == 0`). المدة بالثواني.
+pub fn animated_value(ctx: &egui::Context, id: egui::Id, target: f32, seconds: f32, first: f32) -> f32 {
+    let seconds = if ctx.style().animation_time > 0.0 { seconds } else { 0.0 };
+    if seconds <= 0.0 {
+        return target;
+    }
+    let now = ctx.input(|i| i.time);
+    let key = id.with("animated_value");
+    let (from, start) = match ctx.memory(|m| m.data.get_temp::<(f32, f64, f32)>(key)) {
+        None => (first, now),
+        Some((from, start, goal)) if goal != target => (from + (goal - from) * ease_out(progress(now, start, seconds)), now),
+        Some((from, start, _)) => (from, start),
+    };
+    let t = progress(now, start, seconds);
+    ctx.memory_mut(|m| m.data.insert_temp(key, (from, start, target)));
+    if t < 1.0 {
+        ctx.request_repaint();
+    }
+    from + (target - from) * ease_out(t)
+}
+
+fn progress(now: f64, start: f64, seconds: f32) -> f32 {
+    ((now - start) as f32 / seconds).clamp(0.0, 1.0)
+}
+
+fn ease_out(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
+}
+
 /// مربع إحصاء: أيقونة ورقم كبير ووصف (الوصف كما هو، يُجهّز هنا)
 pub fn stat(ui: &mut egui::Ui, width: f32, icon: Icon, value: usize, label: &str, color: Color32) {
     let p = pal();
@@ -435,10 +466,12 @@ pub fn stat(ui: &mut egui::Ui, width: f32, icon: Icon, value: usize, label: &str
                     icons::show(ui, icon, 18.0, color);
                     // الصفر بلون باهت بدل لونه، والرقم يشغل عرض خاناته دائمًا فلا يهتز أثناء العد
                     let color = if value == 0 { p.muted } else { color };
+                    // العد التصاعدي عند أول ظهور: 400ms استثناء صريح في الخطة، ومرة واحدة لكل بطاقة
+                    let counted = animated_value(ui.ctx(), ui.make_persistent_id(("stat", label)), value as f32, 0.4, 0.0);
                     let font = FontId::new(24.0, FontFamily::Name(SEMIBOLD.into()));
                     let cell = ui.painter().layout_no_wrap("0".repeat(value.to_string().len()), font.clone(), color).size().x;
                     let (rect, _) = ui.allocate_exact_size(egui::vec2(cell, 28.0), egui::Sense::hover());
-                    let galley = ui.painter().layout_no_wrap(value.to_string(), font, color);
+                    let galley = ui.painter().layout_no_wrap((counted.round() as usize).to_string(), font, color);
                     let x = if ar() { rect.right() - galley.size().x } else { rect.left() };
                     ui.painter().galley(egui::pos2(x, rect.center().y - galley.size().y / 2.0), galley, color);
                 });
@@ -534,5 +567,22 @@ mod tests {
             assert!(contrast(Color32::WHITE, p.primary) >= 4.5, "white on primary: {:.2}", contrast(Color32::WHITE, p.primary));
             assert!(contrast(Color32::WHITE, p.primary_hover) >= 4.5);
         }
+    }
+
+    /// العد التصاعدي: يبدأ من الصفر، يتقدّم أسرع في أوله (ease-out)، وينتهي عند الهدف
+    #[test]
+    fn animated_value_counts_from_zero_to_target() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("count_test");
+        let sample = |time: f64| {
+            ctx.begin_frame(egui::RawInput { time: Some(time), ..Default::default() });
+            let value = animated_value(&ctx, id, 100.0, 0.4, 0.0);
+            let _ = ctx.end_frame();
+            value
+        };
+        assert_eq!(sample(0.0), 0.0);
+        let half = sample(0.2);
+        assert!(half > 50.0 && half < 100.0, "half = {half}");
+        assert_eq!(sample(1.0), 100.0);
     }
 }
