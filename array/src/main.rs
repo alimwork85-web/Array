@@ -1901,6 +1901,23 @@ impl eframe::App for ArrayApp {
             }
         }
 
+        // الصفحة كلها تحت عقدة وصول واحدة تُخفى عن قارئ الشاشة ما دامت نافذة تأكيد مفتوحة
+        let page_node = egui::Id::new("page-a11y");
+        let modal = self.confirm_undo || self.confirm_trash;
+        ctx.accesskit_node_builder(page_node, |b| {
+            if modal {
+                b.set_hidden();
+            }
+        });
+        ctx.with_accessibility_parent(page_node, || self.page_panels(ctx));
+
+        self.dialogs(ctx);
+    }
+}
+
+impl ArrayApp {
+    fn page_panels(&mut self, ctx: &egui::Context) {
+        let p = pal();
         self.sidebar(ctx);
 
         egui::TopBottomPanel::bottom("status")
@@ -1953,8 +1970,6 @@ impl eframe::App for ArrayApp {
                     Page::About => self.about_page(ui),
                 });
             });
-
-        self.dialogs(ctx);
     }
 }
 
