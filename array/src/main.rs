@@ -1005,8 +1005,8 @@ impl ArrayApp {
 
         // الأرقام الأساسية
         theme::row(ui, |ui| {
-            // عرض كل مربع = (المتاح - الهوامش والحدود 3×30 - المسافات 2×10) ÷ 3
-            let width = ((ui.available_width() - 3.0 * 30.0 - 2.0 * 10.0) / 3.0).max(100.0);
+            // عرض كل مربع = (المتاح - هوامش الإطار 3×28 - المسافتان بينها) ÷ 3، فيملأ الصف العرض كله
+            let width = ((ui.available_width() - 3.0 * 28.0 - 2.0 * ui.spacing().item_spacing.x) / 3.0).max(100.0);
             theme::stat(ui, width, Icon::ArrowRight, plan.moves.len(), tr("to move or rename", "للنقل أو إعادة التسمية"), p.accent);
             theme::stat(ui, width, Icon::Check, plan.kept_in_folders + plan.in_place, tr("stay where they are", "تبقى في مكانها"), p.text);
             theme::stat(ui, width, Icon::Shield, plan.skipped.len(), tr("protected folders", "مجلدات محمية"), p.success);
@@ -1052,13 +1052,14 @@ impl ArrayApp {
         for (folder, n, existing, artists) in &preview.destinations {
             let name = if folder == THIS_FOLDER { tr("This folder", "هذا المجلد").to_string() } else { folder.clone() };
             // الاسم معزول حتى لا يلتصق به الرقم بعده فيُقرأ اسم إنجليزي مع أرقامه بالمقلوب في العربية
-            let mut label = format!("\u{2068}{name}\u{2069}  ·  {n}");
+            let mut tail = format!("  ·  {n}");
             if *artists > 0 {
-                label.push_str(&format!("  ·  {} {}", count(*artists, Noun::Folder), tr("inside", "بالداخل")));
+                tail.push_str(&format!("  ·  {} {}", count(*artists, Noun::Folder), tr("inside", "بالداخل")));
             } else if !existing {
-                label.push_str(&format!("  ·  {}", tr("new", "جديد")));
+                tail.push_str(&format!("  ·  {}", tr("new", "جديد")));
             }
-            let shown = if ar() { rtl::rtl_line(&label) } else { rtl::for_display(&label.replace(['\u{2068}', '\u{2069}'], "")) };
+            // في الإنجليزية يُجهَّز الاسم وحده؛ لو مرّ السطر كله باتجاه الاسم العربي لانقلب ترتيبه
+            let shown = if ar() { rtl::rtl_line(&format!("\u{2068}{name}\u{2069}{tail}")) } else { format!("{}{tail}", rtl::for_display(&name)) };
             chips.push((category_icon(folder), shown));
         }
         // يُوزَّع على سطور فلا يبقى سطر أخير بشارة واحدة
@@ -1347,11 +1348,22 @@ impl ArrayApp {
             ui.add_space(14.0);
             // رخصة OFL تشترط أن يصل نصها مع الخط المضمّن في البرنامج
             ui.label(theme::muted(t("Font: IBM Plex Sans Arabic © 2017 IBM Corp.", "الخط: IBM Plex Sans Arabic © 2017 IBM Corp.")));
-            egui::CollapsingHeader::new(theme::show(tr("Font license (SIL OFL 1.1)", "رخصة الخط (SIL OFL 1.1)"))).show(ui, |ui| {
-                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-                    ui.label(RichText::new(include_str!("../assets/fonts/OFL-IBMPlexSansArabic.txt")).small().color(p.muted));
+            let open_id = ui.id().with("font_license_open");
+            let mut open = ui.ctx().data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+            if theme::button(ui, Kind::Ghost, Some(Icon::Document), tr("Font license (SIL OFL 1.1)", "رخصة الخط (SIL OFL 1.1)"), true).clicked() {
+                open = !open;
+                ui.ctx().data_mut(|d| d.insert_temp(open_id, open));
+            }
+            if open {
+                // نص الرخصة إنجليزي، فيُعرض من اليسار في كتلة بعرض ثابت وسط الصفحة
+                let w = ui.available_width().min(640.0);
+                ui.allocate_ui_with_layout(egui::vec2(w, 220.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                        ui.set_width(w);
+                        ui.label(RichText::new(include_str!("../assets/fonts/OFL-IBMPlexSansArabic.txt")).small().color(p.muted));
+                    });
                 });
-            });
+            }
             ui.add_space(14.0);
         });
     }
@@ -1506,7 +1518,9 @@ impl ArrayApp {
             .collapsible(false)
             .resizable(false)
             .fixed_size([440.0, 0.0])
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            // وسط النافذة كلها؛ anchor يوسّط داخل ما تتركه اللوحات فتنحرف النافذة بعيدًا عن الشريط الجانبي
+            .pivot(egui::Align2::CENTER_CENTER)
+            .fixed_pos(screen.center())
             .show(ctx, |ui| {
                 theme::column(ui, |ui| {
                     ui.label(theme::strong(theme::show(title), 18.0));
@@ -1692,20 +1706,29 @@ fn summary_cards(ui: &mut egui::Ui, plan: &Plan, options: &Options) -> (bool, Op
 
     let mut show_all = false;
     let mut toggled: Option<(CardKind, bool)> = None;
-    let width = ((ui.available_width() - 70.0) / 2.0).max(230.0);
+    // عمودان يملآن العرض تمامًا بينهما فراغ واحد، فتحاذي حافتاهما مربعات الإحصاء فوقهما
+    let gap = 16.0;
+    let width = ((ui.available_width() - gap) / 2.0).max(230.0);
     {
         {
             // البطاقتان تبدآن من أعلى السطر نفسه؛ theme::row يوسّط عموديًا فتنزل القصيرة
             let top_row = if ar() { egui::Layout::right_to_left(egui::Align::Min) } else { egui::Layout::left_to_right(egui::Align::Min) };
             for pair in cards.chunks(2) {
                 ui.with_layout(top_row, |ui| {
-                    for card in pair {
+                    let spacing = ui.spacing().item_spacing.x;
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    for (i, card) in pair.iter().enumerate() {
+                        if i > 0 {
+                            ui.add_space(gap);
+                        }
                         ui.allocate_ui_with_layout(
                             egui::vec2(width, 0.0),
                             egui::Layout::top_down(egui::Align::Min),
                             |ui| {
+                                ui.spacing_mut().item_spacing.x = spacing;
                                 theme::card(ui, |ui| {
-                                    ui.set_width((width - 30.0).max(180.0));
+                                    // الإطار يضيف 20 من كل جانب
+                                    ui.set_width((width - 40.0).max(180.0));
                                     theme::row(ui, |ui| {
                                         icons::show(ui, card.icon, 18.0, p.accent);
                                         ui.label(theme::strong(rtl::for_display(&card.title), 15.0));
@@ -1713,11 +1736,12 @@ fn summary_cards(ui: &mut egui::Ui, plan: &Plan, options: &Options) -> (bool, Op
                                     });
                                     ui.add_space(6.0);
                                     for (old, new) in &card.summary.examples {
-                                        let line = format!("{old}  ←  {new}");
+                                        // كل اسم يُجهَّز للعرض وحده، فلا يخلط اتجاه الاسم العربي ترتيب السطر كله.
+                                        // القديم في بداية السطر والسهم نحو الجديد: يمين ← يسار في العربية
+                                        let (old, new) = (rtl::for_display(old), rtl::for_display(new));
+                                        let line = if ar() { format!("{new}  ←  {old}") } else { format!("{old}  →  {new}") };
                                         ui.add(
-                                            egui::Label::new(
-                                                RichText::new(rtl::for_display(&line)).small().color(p.muted),
-                                            )
+                                            egui::Label::new(RichText::new(line).small().color(p.muted))
                                             .truncate(true),
                                         );
                                     }
@@ -1734,10 +1758,9 @@ fn summary_cards(ui: &mut egui::Ui, plan: &Plan, options: &Options) -> (bool, Op
                                 });
                             },
                         );
-                        ui.add_space(18.0);
                     }
                 });
-                ui.add_space(10.0);
+                ui.add_space(gap);
             }
         }
     }

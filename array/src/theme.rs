@@ -301,16 +301,14 @@ pub fn column<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> egu
 pub fn para(ui: &mut egui::Ui, text: &str, size: f32, color: Color32, semibold: bool) {
     let family = if semibold { FontFamily::Name(SEMIBOLD.into()) } else { FontFamily::Proportional };
     let font = FontId::new(size, family);
-    if !ar() {
-        ui.add(egui::Label::new(RichText::new(text).font(font).color(color)).wrap(true));
-        return;
-    }
+    // الإنجليزية تمر بالتقسيم نفسه (بلا عكس) لتأخذ قاعدة «لا كلمة وحيدة في آخر الفقرة»
+    let shape = |line: &str| if ar() { rtl::rtl_line(line) } else { line.to_string() };
     let width = ui.available_width().max(80.0);
-    let lines = rtl::wrap_lines(text, width, |line| ui.fonts(|f| f.layout_no_wrap(rtl::rtl_line(line), font.clone(), color).size().x));
+    let lines = rtl::wrap_lines(text, width, |line| ui.fonts(|f| f.layout_no_wrap(shape(line), font.clone(), color).size().x));
     column(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
         for line in lines {
-            ui.add(egui::Label::new(RichText::new(rtl::rtl_line(&line)).font(font.clone()).color(color)).wrap(false));
+            ui.add(egui::Label::new(RichText::new(shape(&line)).font(font.clone()).color(color)).wrap(false));
         }
     });
 }
@@ -559,7 +557,9 @@ pub fn stat(ui: &mut egui::Ui, width: f32, icon: Icon, value: usize, label: &str
                     let counted = animated_value(ui.ctx(), ui.make_persistent_id(("stat", label)), value as f32, 0.4, 0.0);
                     let font = FontId::new(24.0, FontFamily::Name(SEMIBOLD.into()));
                     let cell = ui.painter().layout_no_wrap("0".repeat(value.to_string().len()), font.clone(), color).size().x;
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(cell, 28.0), egui::Sense::hover());
+                    let (rect, response) = ui.allocate_exact_size(egui::vec2(cell, 28.0), egui::Sense::hover());
+                    // الرقم يُرسم رسمًا، فيُعطى لقارئ الشاشة قيمته النهائية نصًا
+                    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, value.to_string()));
                     let galley = ui.painter().layout_no_wrap((counted.round() as usize).to_string(), font, color);
                     let x = if ar() { rect.right() - galley.size().x } else { rect.left() };
                     ui.painter().galley(egui::pos2(x, rect.center().y - galley.size().y / 2.0), galley, color);
