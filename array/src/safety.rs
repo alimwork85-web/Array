@@ -131,7 +131,7 @@ impl SafetyChecker {
             // مجلد فيه مثبّتات فقط (setup.exe) ليس برنامجاً: المثبّتات فئة تُرتَّب
             Some(ProgramFolder::Program(_)) if Self::only_installers(path) => Ok(()),
             Some(kind) => Err(if crate::i18n::ar() {
-                format!("هذا المجلد فيه {}. نقل ملفاته قد يوقفه عن العمل، لذلك لن يرتّبه Array.", kind.reason())
+                format!("هذا المجلد فيه {}. نقل ملفاته قد يوقفه عن العمل، لذلك لن يرتّبه نضيد.", kind.reason())
             } else {
                 format!("This folder belongs to a {}. Moving its files could stop it from working, so Array will not organize it.", kind.reason())
             }),

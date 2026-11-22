@@ -661,7 +661,7 @@ impl ArrayApp {
                 ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(logo.id(), [42.0, 42.0])));
             }
             theme::column(ui, |ui| {
-                ui.label(theme::strong("Array", 21.0));
+                ui.label(theme::strong(t("Array", "نضيد"), 21.0));
                 ui.label(theme::muted(t("File organizer", "منظّم الملفات")).small());
             });
         });
@@ -1316,7 +1316,7 @@ impl ArrayApp {
                 ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(logo.id(), [112.0, 112.0])));
             }
             ui.add_space(6.0);
-            ui.label(theme::strong("Array", 32.0));
+            ui.label(theme::strong(t("Array", "نضيد"), 32.0));
             ui.label(theme::muted(t(&format!("Version {}", VERSION), &format!("الإصدار {}", VERSION))));
             ui.add_space(14.0);
             for (en, arabic) in [
@@ -1366,7 +1366,7 @@ impl ArrayApp {
                     ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(logo.id(), [96.0, 96.0])));
                 }
                 ui.add_space(8.0);
-                ui.label(theme::strong(t("Welcome to Array", "أهلاً بك في Array"), 30.0));
+                ui.label(theme::strong(t("Welcome to Array", "أهلاً بك في نضيد"), 30.0));
                 ui.label(theme::muted(t(
                     "Tidy up scattered files in three steps — safely, on this PC.",
                     "رتّب ملفاتك المبعثرة في ثلاث خطوات — بأمان وعلى جهازك.",
