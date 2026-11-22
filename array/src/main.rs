@@ -861,7 +861,17 @@ impl ArrayApp {
                 // دائرة خلف الأيقونة بلون النتيجة
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(40.0, 40.0), egui::Sense::hover());
                 ui.painter().circle_filled(rect.center(), 20.0, color.gamma_multiply(0.18));
-                icons::paint(ui.painter(), rect.shrink(9.0), icon, color, 0.0);
+                let icon_rect = rect.shrink(9.0);
+                if outcome.ok {
+                    // رسم العلامة تدريجيًا بالقص من أولها إلى آخرها في 350ms عند أول ظهور
+                    let id = ui.make_persistent_id(("outcome_check", outcome.message.as_str()));
+                    let t = theme::animated_value(ui.ctx(), id, 1.0, 0.35, 0.0);
+                    let edge = egui::lerp(icon_rect.left()..=icon_rect.right(), t);
+                    let clip = egui::Rect::from_min_max(icon_rect.min, egui::pos2(edge, icon_rect.bottom()));
+                    icons::paint(&ui.painter().with_clip_rect(clip), icon_rect, icon, color, 0.0);
+                } else {
+                    icons::paint(ui.painter(), icon_rect, icon, color, 0.0);
+                }
                 let first = outcome.message.lines().next().unwrap_or_default();
                 // الرمز في بداية السطر يظهر مرة واحدة في الأيقونة
                 let first = first.trim_start_matches(['✔', '↩', '⚠', '❌']).trim_start();
