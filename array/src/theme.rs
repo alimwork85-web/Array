@@ -347,7 +347,8 @@ pub fn nav_item(ui: &mut egui::Ui, icon: Icon, text: &str, selected: bool, enabl
         ui.painter().rect_filled(rect, 8.0, p.hover);
     }
     if response.has_focus() {
-        ui.painter().rect_stroke(rect, 8.0, Stroke::new(2.0_f32, p.accent));
+        // إطار التركيز للوحة المفاتيح: خط رفيع شبه شفاف، لا إطار سميك يغطي العنصر المختار
+        ui.painter().rect_stroke(rect.shrink(0.5), 8.0, Stroke::new(1.0_f32, p.accent.gamma_multiply(0.5)));
     }
     let color = if !enabled {
         p.muted.gamma_multiply(0.7)
