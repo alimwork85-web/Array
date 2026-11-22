@@ -1388,6 +1388,10 @@ impl ArrayApp {
             let gap = 16.0;
             let card_width = ((ui.available_width().min(980.0) - 2.0 * gap) / 3.0 - 42.0).max(180.0);
             let total = 3.0 * (card_width + 42.0) + 2.0 * gap;
+            // البطاقات بارتفاع واحد: ارتفاع أطول محتوى في الإطار السابق
+            let tallest_id = ui.id().with("welcome_card_height");
+            let tallest = ui.ctx().data(|d| d.get_temp::<f32>(tallest_id)).unwrap_or(0.0);
+            let mut measured = 0.0_f32;
             theme::row(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = gap;
                 ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
@@ -1399,7 +1403,8 @@ impl ArrayApp {
                         .inner_margin(egui::Margin::same(20.0))
                         .show(ui, |ui| {
                             ui.set_width(card_width);
-                            theme::column(ui, |ui| {
+                            ui.set_min_height(tallest);
+                            let content = theme::column(ui, |ui| {
                                 theme::row(ui, |ui| {
                                     let (rect, _) = ui.allocate_exact_size(egui::vec2(40.0, 40.0), egui::Sense::hover());
                                     ui.painter().circle_filled(rect.center(), 20.0, p.selected);
@@ -1409,9 +1414,14 @@ impl ArrayApp {
                                 ui.label(theme::strong(theme::show(title), 16.0));
                                 theme::para(ui, body, 14.0, p.muted, false);
                             });
+                            measured = measured.max(content.response.rect.height());
                         });
                 }
             });
+            if measured != tallest {
+                ui.ctx().data_mut(|d| d.insert_temp(tallest_id, measured));
+                ui.ctx().request_repaint();
+            }
 
             ui.add_space(22.0);
             ui.vertical_centered(|ui| {
