@@ -1777,6 +1777,8 @@ impl eframe::App for ArrayApp {
             theme::apply(ctx, dark);
             self.dark = Some(dark);
         }
+        #[cfg(windows)]
+        theme::title_bar(dark);
         let p = pal();
 
         self.poll_job();

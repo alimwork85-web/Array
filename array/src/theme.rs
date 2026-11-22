@@ -2,7 +2,7 @@
 //! الألوان من أيقونة التطبيق (فيروزي وكهرماني)، بسمتين فاتحة وداكنة، وكل قيمة في مكان واحد.
 //! الخط Segoe UI (موجود في ويندوز، فيعمل التطبيق بدون إنترنت) مع Tahoma للعربية.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use eframe::egui::{self, Color32, FontFamily, FontId, RichText, Rounding, Stroke, TextStyle};
 
@@ -179,6 +179,58 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
     style.spacing.button_padding = egui::vec2(14.0, 7.0);
     style.spacing.interact_size.y = 30.0;
     ctx.set_style(style);
+}
+
+/// السمة المطبّقة على شريط العنوان: 0 فاتح، 1 داكن، 2 لم تُطبّق بعد
+static TITLE_BAR: AtomicU8 = AtomicU8::new(2);
+
+/// شريط عنوان ويندوز يتبع السمة: داكن أو فاتح، وبلون خلفية التطبيق (لون الشريط يعمل في ويندوز 11 فقط).
+/// تُستدعى كل إطار، ولا تعمل إلا عند تغيّر السمة؛ وإن لم تُعثر على النافذة بعد تُعاد في الإطار التالي.
+#[cfg(windows)]
+pub fn title_bar(dark: bool) {
+    if TITLE_BAR.load(Ordering::Relaxed) == dark as u8 {
+        return;
+    }
+    use std::ffi::c_void;
+    type Hwnd = *mut c_void;
+    #[link(name = "user32")]
+    extern "system" {
+        fn EnumThreadWindows(thread: u32, f: extern "system" fn(Hwnd, isize) -> i32, data: isize) -> i32;
+        fn GetWindowTextW(hwnd: Hwnd, text: *mut u16, max: i32) -> i32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentThreadId() -> u32;
+    }
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmSetWindowAttribute(hwnd: Hwnd, attr: u32, value: *const c_void, size: u32) -> i32;
+    }
+    // نافذة هذا الخيط التي عنوانها "Array" (الخيط يملك نوافذ مخفية أخرى مثل نافذة IME)
+    extern "system" fn find(hwnd: Hwnd, out: isize) -> i32 {
+        let mut buf = [0u16; 16];
+        let n = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+        if String::from_utf16_lossy(&buf[..n.max(0) as usize]) == "Array" {
+            unsafe { *(out as *mut Hwnd) = hwnd };
+            return 0;
+        }
+        1
+    }
+    let mut hwnd: Hwnd = std::ptr::null_mut();
+    unsafe {
+        EnumThreadWindows(GetCurrentThreadId(), find, &mut hwnd as *mut Hwnd as isize);
+        if hwnd.is_null() {
+            return;
+        }
+        let p = if dark { &DARK } else { &LIGHT };
+        let on: i32 = dark as i32;
+        // 20 = DWMWA_USE_IMMERSIVE_DARK_MODE، 35 = DWMWA_CAPTION_COLOR (اللون بترتيب 0x00BBGGRR)
+        DwmSetWindowAttribute(hwnd, 20, &on as *const i32 as *const c_void, 4);
+        let [r, g, b, _] = p.bg.to_array();
+        let color: u32 = r as u32 | (g as u32) << 8 | (b as u32) << 16;
+        DwmSetWindowAttribute(hwnd, 35, &color as *const u32 as *const c_void, 4);
+    }
+    TITLE_BAR.store(dark as u8, Ordering::Relaxed);
 }
 
 /// نص عنوان بخط Semibold
