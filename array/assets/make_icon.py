@@ -14,12 +14,12 @@ S = 1024                      # master canvas
 MARGIN = 40                   # transparent margin around the rounded square (~4%)
 RADIUS = 230                  # corner radius (~22%)
 COLORS = {
-    'top': (38, 150, 150),        # تدرّج الخلفية: فيروزي في الأعلى
-    'bottom': (20, 52, 92),       # ... كحلي في الأسفل
-    'back': (240, 178, 74, 255),  # المجلد الخلفي: كهرماني
-    'middle': (250, 206, 120, 255),  # المجلد الأوسط: كهرماني فاتح
-    'front': (255, 248, 232, 255),   # المجلد الأمامي: كريمي
-    'shadow': (10, 30, 50, 70),
+    'top': (34, 146, 146),        # تدرّج الخلفية: فيروزي التطبيق في الأعلى
+    'bottom': (18, 92, 98),       # ... فيروزي أعمق في الأسفل (دون كحلي ودون لمعة)
+    'tile': (255, 248, 232, 255),    # المربعات المستقرة: كريمي
+    'slot': (255, 255, 255, 46),     # مكان المربع الرابع قبل أن يستقر
+    'moving': (240, 178, 74, 255),   # المربع الذي في طريقه إلى مكانه: كهرماني
+    'shadow': (6, 40, 44, 80),
 }
 ICO_SIZES = [16, 24, 32, 48, 64, 128, 256]
 PREVIEW_SIZES = [16, 24, 32, 48, 256]
@@ -30,7 +30,7 @@ def lerp(a, b, t):
 
 
 def background():
-    """Rounded square with a vertical gradient and a soft top highlight."""
+    """Rounded square with a soft vertical gradient, flat (no gloss highlight)."""
     grad = Image.new('RGB', (S, S))
     gd = ImageDraw.Draw(grad)
     for y in range(S):
@@ -39,34 +39,37 @@ def background():
     ImageDraw.Draw(mask).rounded_rectangle([MARGIN, MARGIN, S - MARGIN, S - MARGIN], radius=RADIUS, fill=255)
     img = Image.new('RGBA', (S, S), (0, 0, 0, 0))
     img.paste(grad, (0, 0), mask)
-    highlight = Image.new('RGBA', (S, S), (0, 0, 0, 0))
-    ImageDraw.Draw(highlight).ellipse([-200, -620, S + 200, 420], fill=(255, 255, 255, 38))
-    return Image.alpha_composite(img, Image.composite(highlight, Image.new('RGBA', (S, S)), mask))
+    return img
 
 
-def draw_folder(d, x, y, w, h, color, shadow):
-    """مجلد: لسان صغير أعلى اليسار + جسم بزوايا مستديرة، مع ظل خفيف تحته."""
-    tab_w, tab_h, r = int(w * 0.38), int(h * 0.22), int(h * 0.16)
-    d.rounded_rectangle([x + 10, y + 18, x + w + 10, y + h + 18], radius=r, fill=shadow)
-    d.rounded_rectangle([x, y - tab_h + r, x + tab_w, y + r * 2], radius=r, fill=color)
-    d.rounded_rectangle([x, y, x + w, y + h], radius=r, fill=color)
+def tile(size, color, shadow=None, angle=0.0):
+    """مربع بزوايا مستديرة على طبقة شفافة، مع ظل خفيف، ويمكن إمالته."""
+    pad = 60
+    layer = Image.new('RGBA', (size + pad * 2, size + pad * 2), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    r = int(size * 0.24)
+    if shadow:
+        d.rounded_rectangle([pad + 8, pad + 16, pad + size + 8, pad + size + 16], radius=r, fill=shadow)
+    d.rounded_rectangle([pad, pad, pad + size, pad + size], radius=r, fill=color)
+    if angle:
+        layer = layer.rotate(angle, resample=Image.BICUBIC)
+    return layer, pad
 
 
 def draw_symbol(img):
-    """Array يرتّب الملفات المبعثرة في مجلدات: ثلاثة مجلدات مصفوفة فوق بعضها بترتيب منتظم.
-    الخطوط والأشكال كبيرة حتى تبقى واضحة بحجم 16 بكسل."""
-    layer = Image.new('RGBA', (S, S), (0, 0, 0, 0))
-    d = ImageDraw.Draw(layer)
-    w, h = 600, 300
-    x0 = (S - w) // 2
-    # من الخلف إلى الأمام، كل مجلد أسفل السابق قليلاً
-    for i, key in enumerate(('back', 'middle', 'front')):
-        y = 250 + i * 130
-        draw_folder(d, x0 + (2 - i) * 0 , y, w, h, COLORS[key], COLORS['shadow'])
-    # خط ملصق على المجلد الأمامي: يوحي بأن المحتوى مرتّب ومسمّى
-    fy = 250 + 2 * 130
-    d.rounded_rectangle([x0 + 90, fy + 120, x0 + w - 90, fy + 168], radius=24, fill=(20, 52, 92, 255))
-    img.alpha_composite(layer)
+    """Array يحوّل الملفات المبعثرة إلى ترتيب: شبكة 2×2، ثلاثة مربعات استقرت في أماكنها،
+    والرابع (كهرماني) مائل في طريقه إلى مكانه الفارغ. الأشكال كبيرة لتبقى واضحة بحجم 16 بكسل."""
+    size, gap = 250, 64
+    x0 = (S - (size * 2 + gap)) // 2
+    cells = [(x0 + c * (size + gap), x0 + r * (size + gap)) for r in range(2) for c in range(2)]
+    # مكان المربع الرابع (أعلى اليمين) يظهر شفافاً
+    slot, pad = tile(size, COLORS['slot'])
+    img.alpha_composite(slot, (cells[1][0] - pad, cells[1][1] - pad))
+    for i in (0, 2, 3):
+        t, pad = tile(size, COLORS['tile'], COLORS['shadow'])
+        img.alpha_composite(t, (cells[i][0] - pad, cells[i][1] - pad))
+    moving, pad = tile(size, COLORS['moving'], COLORS['shadow'], angle=-14)
+    img.alpha_composite(moving, (cells[1][0] - pad + 34, cells[1][1] - pad - 34))
 
 
 def preview_sheet(img):
