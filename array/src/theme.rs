@@ -341,7 +341,9 @@ pub fn nav_item(ui: &mut egui::Ui, icon: Icon, text: &str, selected: bool, enabl
     let rtl = ar();
     if selected {
         ui.painter().rect_filled(rect, 8.0, p.selected);
-        let edge = if rtl { rect.right_center() - egui::vec2(3.0, 10.0) } else { rect.left_center() - egui::vec2(0.0, 10.0) };
+        // المؤشر ينتقل بنعومة بين العناصر: موضع y يُحفظ بمعرّف ثابت ويُحرَّك في 200ms
+        let y = animated_value(ui.ctx(), egui::Id::new("nav_indicator_y"), rect.center().y, 0.2, rect.center().y);
+        let edge = if rtl { egui::pos2(rect.right() - 3.0, y - 10.0) } else { egui::pos2(rect.left(), y - 10.0) };
         ui.painter().rect_filled(egui::Rect::from_min_size(edge, egui::vec2(3.0, 20.0)), 2.0, p.accent);
     } else if hovered {
         ui.painter().rect_filled(rect, 8.0, p.hover);
