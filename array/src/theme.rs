@@ -178,6 +178,11 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
     style.spacing.item_spacing = egui::vec2(10.0, 8.0);
     style.spacing.button_padding = egui::vec2(14.0, 7.0);
     style.spacing.interact_size.y = 30.0;
+    // إذا أُغلق "إظهار الرسوم المتحركة" في ويندوز تصير كل الحركات فورية (كلها مبنية على animation_time)
+    // shortcut: يُقرأ الإعداد عند البدء وعند تغيير السمة فقط، ويُراقب لحظياً إن احتاجه أحد
+    if !system_animations() {
+        style.animation_time = 0.0;
+    }
     ctx.set_style(style);
 }
 
@@ -231,6 +236,24 @@ pub fn title_bar(dark: bool) {
         DwmSetWindowAttribute(hwnd, 35, &color as *const u32 as *const c_void, 4);
     }
     TITLE_BAR.store(dark as u8, Ordering::Relaxed);
+}
+
+/// هل إعداد ويندوز "إظهار الرسوم المتحركة" مفعّل (SPI_GETCLIENTAREAANIMATION)
+#[cfg(windows)]
+pub fn system_animations() -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn SystemParametersInfoW(action: u32, param: u32, value: *mut std::ffi::c_void, win_ini: u32) -> i32;
+    }
+    let mut on: i32 = 1;
+    // إن فشلت القراءة تبقى الحركة مفعّلة كما هي في ويندوز افتراضياً
+    unsafe { SystemParametersInfoW(0x1042, 0, &mut on as *mut i32 as *mut std::ffi::c_void, 0) };
+    on != 0
+}
+
+#[cfg(not(windows))]
+pub fn system_animations() -> bool {
+    true
 }
 
 /// نص عنوان بخط Semibold
