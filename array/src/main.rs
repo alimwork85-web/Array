@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use storage::{Storage, UndoLog};
-use theme::{pal, t, Kind};
+use theme::{pal, t, Kind, Speak};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -661,8 +661,8 @@ impl ArrayApp {
                 ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(logo.id(), [42.0, 42.0])));
             }
             theme::column(ui, |ui| {
-                ui.label(theme::strong(t("Array", "نضيد"), 21.0));
-                ui.label(theme::muted(t("File organizer", "منظّم الملفات")).small());
+                ui.label(theme::strong(t("Array", "نضيد"), 21.0)).speak();
+                ui.label(theme::muted(t("File organizer", "منظّم الملفات")).small()).speak();
             });
         });
         ui.add_space(34.0);
@@ -682,14 +682,14 @@ impl ArrayApp {
         }
 
         ui.with_layout(egui::Layout::bottom_up(if ar() { egui::Align::Max } else { egui::Align::Min }), |ui| {
-            ui.label(theme::muted(t(&format!("Version {}", VERSION), &format!("الإصدار {}", VERSION))).small());
+            ui.label(theme::muted(t(&format!("Version {}", VERSION), &format!("الإصدار {}", VERSION))).small()).speak();
             theme::icon_text(ui, Icon::Lock, theme::muted(t("Works offline on this PC", "يعمل دون إنترنت على جهازك")).small(), p.muted);
         });
     }
 
     fn page_header(ui: &mut egui::Ui, title: &str, subtitle: &str) {
         ui.add_space(4.0);
-        ui.label(theme::strong(theme::show(title), 28.0));
+        ui.label(theme::strong(theme::show(title), 28.0)).speak();
         theme::para(ui, subtitle, 15.0, pal().muted, false);
         ui.add_space(16.0);
     }
@@ -741,9 +741,9 @@ impl ArrayApp {
                                     theme::column(ui, |ui| {
                                         theme::row(ui, |ui| {
                                             icons::show(ui, Icon::Folder, 34.0, p.accent);
-                                            ui.label(theme::strong(rtl::for_display(&folder_name(&path)), 18.0));
+                                            ui.label(theme::strong(rtl::for_display(&folder_name(&path)), 18.0)).speak();
                                         });
-                                        ui.label(theme::muted(rtl::for_display(&path.display().to_string())).small());
+                                        ui.label(theme::muted(rtl::for_display(&path.display().to_string())).small()).speak();
                                         ui.add_space(10.0);
                                         theme::row(ui, |ui| {
                                             if theme::button(ui, Kind::Secondary, Some(Icon::Folder), tr("Change folder", "تغيير المجلد"), true).clicked() {
@@ -766,8 +766,8 @@ impl ArrayApp {
                                         } else {
                                             t("Drop a folder here", "اسحب مجلداً وأفلته هنا")
                                         };
-                                        ui.label(theme::strong(title, 17.0));
-                                        ui.label(theme::muted(t("or", "أو")));
+                                        ui.label(theme::strong(title, 17.0)).speak();
+                                        ui.label(theme::muted(t("or", "أو"))).speak();
                                         if theme::button(ui, Kind::Secondary, Some(Icon::Folder), tr("Browse…", "استعراض…"), true).clicked() {
                                             if let Some(picked) = FileDialog::new().pick_folder() {
                                                 self.select_folder(picked);
@@ -805,7 +805,7 @@ impl ArrayApp {
             } else {
                 t("Choose a folder first.", "اختر مجلداً أولاً.")
             };
-            ui.label(theme::muted(hint));
+            ui.label(theme::muted(hint)).speak();
         });
     }
 
@@ -878,7 +878,7 @@ impl ArrayApp {
                 theme::para(ui, first, 16.0, p.text, true);
             });
             if outcome.folder.exists() {
-                ui.label(theme::muted(rtl::for_display(&outcome.folder.display().to_string())).small());
+                ui.label(theme::muted(rtl::for_display(&outcome.folder.display().to_string())).small()).speak();
             }
             if let Some(stats) = self.last_stats {
                 ui.add_space(8.0);
@@ -894,7 +894,7 @@ impl ArrayApp {
                         count(stats.left, Noun::File),
                         tr("stayed: their category is switched off.", "بقيت: فئتها موقوفة.")
                     );
-                    ui.label(theme::muted(rtl::for_display(&note)));
+                    ui.label(theme::muted(rtl::for_display(&note))).speak();
                 }
             }
             // مكررات «مكررات للمراجعة»: تُعرض للتخلص منها فقط إن كان لكل واحدة توأم خارجها
@@ -909,7 +909,7 @@ impl ArrayApp {
                             count(scan.orphans.len(), Noun::File),
                             tr("no original outside — left untouched", "لا أصل لها — لم تُلمس")
                         );
-                        ui.label(theme::muted(rtl::for_display(&note)));
+                        ui.label(theme::muted(rtl::for_display(&note))).speak();
                     }
                     if !scan.movable.is_empty() {
                         ui.add_space(8.0);
@@ -963,13 +963,13 @@ impl ArrayApp {
             Some(Job::Planning(..)) => {
                 theme::row(ui, |ui| {
                     icons::spinner(ui, 22.0, p.accent);
-                    ui.label(theme::strong(t("Scanning files…", "جارٍ فحص الملفات…"), 17.0));
+                    ui.label(theme::strong(t("Scanning files…", "جارٍ فحص الملفات…"), 17.0)).speak();
                 });
             }
             Some(Job::Trashing(..)) => {
                 theme::row(ui, |ui| {
                     icons::spinner(ui, 22.0, p.accent);
-                    ui.label(theme::strong(t("Moving duplicates to the Recycle Bin…", "جارٍ نقل المكررات إلى سلة المحذوفات…"), 17.0));
+                    ui.label(theme::strong(t("Moving duplicates to the Recycle Bin…", "جارٍ نقل المكررات إلى سلة المحذوفات…"), 17.0)).speak();
                 });
             }
             Some(Job::Moving { restoring, progress, total, .. }) => {
@@ -978,7 +978,7 @@ impl ArrayApp {
                 let label = if *restoring { t("Restoring…", "جارٍ الإرجاع…") } else { t("Organizing…", "جارٍ الترتيب…") };
                 theme::row(ui, |ui| {
                     icons::spinner(ui, 22.0, p.accent);
-                    ui.label(theme::strong(label, 17.0));
+                    ui.label(theme::strong(label, 17.0)).speak();
                 });
                 ui.add_space(8.0);
                 ui.add(egui::ProgressBar::new(fraction).text(format!("{} / {}", done, total)).fill(p.primary));
@@ -1026,7 +1026,7 @@ impl ArrayApp {
                     count(plan.duplicates, Noun::File)
                 )
             };
-            ui.label(theme::muted(rtl::for_display(&note)));
+            ui.label(theme::muted(rtl::for_display(&note))).speak();
             ui.add_space(6.0);
         }
 
@@ -1043,7 +1043,7 @@ impl ArrayApp {
                     count(plan.moves.len(), Noun::File)
                 )
             };
-            ui.label(theme::muted(rtl::for_display(&warning)));
+            ui.label(theme::muted(rtl::for_display(&warning))).speak();
             ui.add_space(6.0);
         }
 
@@ -1073,7 +1073,7 @@ impl ArrayApp {
             };
             let response = theme::row(ui, |ui| {
                 icons::show(ui, Icon::Shield, 16.0, p.success);
-                ui.add(egui::Label::new(RichText::new(theme::show(&label)).color(p.success)).sense(egui::Sense::click()))
+                ui.add(egui::Label::new(RichText::new(theme::show(&label)).color(p.success)).sense(egui::Sense::click())).speak()
             })
             .inner;
             if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
@@ -1083,7 +1083,7 @@ impl ArrayApp {
                 egui::ScrollArea::vertical().id_source("skipped_list").max_height(90.0).show(ui, |ui| {
                     theme::column(ui, |ui| {
                         for line in &preview.skipped {
-                            ui.label(RichText::new(rtl::for_display(line)).small());
+                            ui.label(RichText::new(rtl::for_display(line)).small()).speak();
                         }
                     });
                 });
@@ -1098,7 +1098,7 @@ impl ArrayApp {
                 count(preview.plan.left.len(), Noun::File),
                 tr("stay where they are: their category is switched off.", "تبقى في مكانها: فئتها موقوفة.")
             );
-            ui.label(theme::muted(rtl::for_display(&note)));
+            ui.label(theme::muted(rtl::for_display(&note))).speak();
             ui.add_space(6.0);
         }
         let (show_all, toggled) = if self.show_all { (false, None) } else { summary_cards(ui, &preview.plan, &self.options) };
@@ -1196,7 +1196,7 @@ impl ArrayApp {
                 theme::section_title(ui, Icon::History, &t("Last organize", "آخر ترتيب"));
                 ui.add_space(8.0);
                 theme::icon_text(ui, Icon::Folder, theme::strong(rtl::for_display(&folder_name(&source)), 15.0), p.muted);
-                ui.label(theme::muted(rtl::for_display(&source.display().to_string())).small());
+                ui.label(theme::muted(rtl::for_display(&source.display().to_string())).small()).speak();
                 if let Some(when) = self.storage.undo_saved_at() {
                     let local: DateTime<Local> = when.into();
                     theme::icon_text(ui, Icon::Clock, theme::muted(local.format("%Y-%m-%d  %H:%M").to_string()), p.muted);
@@ -1219,11 +1219,11 @@ impl ArrayApp {
                 ui.vertical_centered(|ui| {
                     ui.add_space(10.0);
                     icons::show(ui, Icon::History, 40.0, p.muted);
-                    ui.label(theme::strong(t("Nothing to undo", "لا يوجد ما يُتراجع عنه"), 17.0));
+                    ui.label(theme::strong(t("Nothing to undo", "لا يوجد ما يُتراجع عنه"), 17.0)).speak();
                     ui.label(theme::muted(t(
                         "After you organize a folder, you can put everything back from here.",
                         "بعد ترتيب أي مجلد، يمكنك إعادة كل شيء من هنا.",
-                    )));
+                    ))).speak();
                     ui.add_space(10.0);
                 });
             }
@@ -1279,8 +1279,8 @@ impl ArrayApp {
                     ui.add_space(8.0);
                     let speakers = format!("{}  {}", tr("Speaker words:", "كلمات أصحاب المقاطع:"), self.options.speaker_keywords.join("، "));
                     let ai_tools = format!("{}  {}", tr("AI tools:", "أدوات الذكاء الاصطناعي:"), self.options.ai_markers.join(", "));
-                    ui.label(RichText::new(theme::show(&speakers)).small());
-                    ui.label(RichText::new(theme::show(&ai_tools)).small());
+                    ui.label(RichText::new(theme::show(&speakers)).small()).speak();
+                    ui.label(RichText::new(theme::show(&ai_tools)).small()).speak();
                     ui.add_space(8.0);
                     if theme::button(ui, Kind::Secondary, Some(Icon::Edit), tr("Edit lists in Notepad", "تعديل القوائم في Notepad"), true).clicked() {
                         self.open_settings_file();
@@ -1317,15 +1317,15 @@ impl ArrayApp {
                 ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(logo.id(), [112.0, 112.0])));
             }
             ui.add_space(6.0);
-            ui.label(theme::strong(t("Array", "نضيد"), 32.0));
-            ui.label(theme::muted(t(&format!("Version {}", VERSION), &format!("الإصدار {}", VERSION))));
+            ui.label(theme::strong(t("Array", "نضيد"), 32.0)).speak();
+            ui.label(theme::muted(t(&format!("Version {}", VERSION), &format!("الإصدار {}", VERSION)))).speak();
             ui.add_space(14.0);
             for (en, arabic) in [
                 ("Gathers scattered files and puts them in tidy folders —", "يجمع الملفات المبعثرة ويضعها في مجلدات مرتبة —"),
                 ("recitations and songs into each artist's folder —", "التلاوات والأغاني في مجلد كل قارئ وفنان —"),
                 ("without touching what you already organized.", "دون أن يمس ما رتّبته أنت."),
             ] {
-                ui.label(t(en, arabic));
+                ui.label(t(en, arabic)).speak();
             }
             ui.add_space(18.0);
             // سطر بأيقونة في المنتصف: عرضه يُحسب ثم تُترك مسافة مساوية على الجانبين
@@ -1334,11 +1334,11 @@ impl ArrayApp {
             ui.horizontal(|ui| {
                 ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
                 if ar() {
-                    ui.label(RichText::new(note.clone()).color(p.success));
+                    ui.label(RichText::new(note.clone()).color(p.success)).speak();
                     icons::show(ui, Icon::Lock, 16.0, p.success);
                 } else {
                     icons::show(ui, Icon::Lock, 16.0, p.success);
-                    ui.label(RichText::new(note.clone()).color(p.success));
+                    ui.label(RichText::new(note.clone()).color(p.success)).speak();
                 }
             });
             ui.add_space(14.0);
@@ -1347,7 +1347,7 @@ impl ArrayApp {
             }
             ui.add_space(14.0);
             // رخصة OFL تشترط أن يصل نصها مع الخط المضمّن في البرنامج
-            ui.label(theme::muted(t("Font: IBM Plex Sans Arabic © 2017 IBM Corp.", "الخط: IBM Plex Sans Arabic © 2017 IBM Corp.")));
+            ui.label(theme::muted(t("Font: IBM Plex Sans Arabic © 2017 IBM Corp.", "الخط: IBM Plex Sans Arabic © 2017 IBM Corp."))).speak();
             let open_id = ui.id().with("font_license_open");
             let mut open = ui.ctx().data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
             if theme::button(ui, Kind::Ghost, Some(Icon::Document), tr("Font license (SIL OFL 1.1)", "رخصة الخط (SIL OFL 1.1)"), true).clicked() {
@@ -1378,11 +1378,11 @@ impl ArrayApp {
                     ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(logo.id(), [96.0, 96.0])));
                 }
                 ui.add_space(8.0);
-                ui.label(theme::strong(t("Welcome to Array", "أهلاً بك في نضيد"), 30.0));
+                ui.label(theme::strong(t("Welcome to Array", "أهلاً بك في نضيد"), 30.0)).speak();
                 ui.label(theme::muted(t(
                     "Tidy up scattered files in three steps — safely, on this PC.",
                     "رتّب ملفاتك المبعثرة في ثلاث خطوات — بأمان وعلى جهازك.",
-                )));
+                ))).speak();
                 ui.add_space(14.0);
                 let mut selected = if ar() { 0 } else { 1 };
                 if theme::segmented(ui, &["العربية", "English"], &mut selected) {
@@ -1439,7 +1439,7 @@ impl ArrayApp {
                                         icons::paint(ui.painter(), rect.shrink(10.0), icon, p.accent, 0.0);
                                     });
                                     ui.add_space(6.0);
-                                    ui.label(theme::strong(theme::show(title), 16.0));
+                                    ui.label(theme::strong(theme::show(title), 16.0)).speak();
                                     theme::para(ui, body, 14.0, p.muted, false);
                                 });
                                 measured = measured.max(content.response.rect.height());
@@ -1461,7 +1461,7 @@ impl ArrayApp {
                     "Your existing folders stay as they are, and everything runs offline.",
                     "مجلداتك الحالية تبقى كما هي، وكل شيء يعمل دون إنترنت.",
                 );
-                ui.label(theme::muted(note));
+                ui.label(theme::muted(note)).speak();
                 ui.add_space(14.0);
                 if theme::button(ui, Kind::Primary, Some(Icon::ArrowRight), tr("Get started", "ابدأ"), true).clicked() {
                     self.set_option(|o| o.welcome_seen = true);
@@ -1524,7 +1524,7 @@ impl ArrayApp {
             .fixed_pos(screen.center())
             .show(ctx, |ui| {
                 theme::column(ui, |ui| {
-                    ui.label(theme::strong(theme::show(title), 18.0));
+                    ui.label(theme::strong(theme::show(title), 18.0)).speak();
                     ui.add_space(6.0);
                     theme::para(ui, body, 15.0, p.text, false);
                     theme::para(ui, note, 13.0, p.muted, false);
@@ -1732,19 +1732,21 @@ fn summary_cards(ui: &mut egui::Ui, plan: &Plan, options: &Options) -> (bool, Op
                                     ui.set_width((width - 40.0).max(180.0));
                                     theme::row(ui, |ui| {
                                         icons::show(ui, card.icon, 18.0, p.accent);
-                                        ui.label(theme::strong(rtl::for_display(&card.title), 15.0));
+                                        ui.label(theme::strong(rtl::for_display(&card.title), 15.0)).speak();
                                         ui.label(theme::strong(card.summary.count.to_string(), 15.0).color(p.accent));
                                     });
                                     ui.add_space(6.0);
                                     for (old, new) in &card.summary.examples {
                                         // كل اسم يُجهَّز للعرض وحده، فلا يخلط اتجاه الاسم العربي ترتيب السطر كله.
                                         // القديم في بداية السطر والسهم نحو الجديد: يمين ← يسار في العربية
+                                        let spoken = format!("{old}  →  {new}");
                                         let (old, new) = (rtl::for_display(old), rtl::for_display(new));
                                         let line = if ar() { format!("{new}  ←  {old}") } else { format!("{old}  →  {new}") };
                                         ui.add(
                                             egui::Label::new(RichText::new(line).small().color(p.muted))
                                             .truncate(true),
-                                        );
+                                        )
+                                        .speak_as(&spoken);
                                     }
                                     ui.add_space(8.0);
                                     let mut on = card.enabled;
@@ -1855,6 +1857,7 @@ fn table_cell(ui: &mut egui::Ui, width: f32, height: f32, text: &str, color: egu
     ui.allocate_ui_with_layout(egui::vec2(width, height), layout, |ui| {
         ui.set_min_width(width);
         let response = ui.add(egui::Label::new(RichText::new(shown).font(font.clone()).color(color)).wrap(false));
+        let response = if ready { response.speak() } else { response.speak_as(text) };
         if truncated {
             response.on_hover_text(display(text));
         }
@@ -1937,7 +1940,7 @@ impl ArrayApp {
                     if let Some(icon) = icon {
                         icons::show(ui, icon, 14.0, color);
                     }
-                    ui.add(egui::Label::new(theme::muted(theme::show(text.trim_start())).small()).truncate(!ar()));
+                    ui.add(egui::Label::new(theme::muted(theme::show(text.trim_start())).small()).truncate(!ar())).speak();
                 });
             });
 

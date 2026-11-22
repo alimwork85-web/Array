@@ -277,6 +277,30 @@ pub fn show(text: &str) -> String {
     if ar() { rtl::rtl_line(text) } else { text.to_owned() }
 }
 
+/// اسم العنصر عند قارئ الشاشة: egui يعطيه النص المرسوم، وهو في العربية حروف مشكّلة مقلوبة
+pub trait Speak: Sized {
+    /// يعيد للعنصر أصل نصه إن كان قد مرّ بالتجهيز للعرض
+    fn speak(self) -> Self;
+    /// يسمّي العنصر بنص محدد (لسطر رُكّب من عدة أجزاء)
+    fn speak_as(self, name: &str) -> Self;
+}
+
+impl Speak for egui::Response {
+    fn speak(self) -> Self {
+        self.ctx.accesskit_node_builder(self.id, |b| {
+            if let Some(name) = b.name().and_then(rtl::original) {
+                b.set_name(name);
+            }
+        });
+        self
+    }
+
+    fn speak_as(self, name: &str) -> Self {
+        self.ctx.accesskit_node_builder(self.id, |b| b.set_name(name));
+        self
+    }
+}
+
 /// نص الواجهة بلغتها الحالية، جاهز للرسم
 pub fn t(en: &str, arabic: &str) -> String {
     show(tr(en, arabic))
@@ -308,7 +332,7 @@ pub fn para(ui: &mut egui::Ui, text: &str, size: f32, color: Color32, semibold: 
     column(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
         for line in lines {
-            ui.add(egui::Label::new(RichText::new(shape(&line)).font(font.clone()).color(color)).wrap(false));
+            ui.add(egui::Label::new(RichText::new(shape(&line)).font(font.clone()).color(color)).wrap(false)).speak();
         }
     });
 }
@@ -334,7 +358,7 @@ pub fn step_title(ui: &mut egui::Ui, number: &str, title: &str) {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover());
         ui.painter().circle_filled(rect.center(), 13.0, pal().primary);
         ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, number, FontId::new(14.0, FontFamily::Name(SEMIBOLD.into())), Color32::WHITE);
-        ui.label(strong(title, 17.0));
+        ui.label(strong(title, 17.0)).speak();
     });
 }
 
@@ -342,7 +366,7 @@ pub fn step_title(ui: &mut egui::Ui, number: &str, title: &str) {
 pub fn section_title(ui: &mut egui::Ui, icon: Icon, title: &str) {
     row(ui, |ui| {
         icons::show(ui, icon, 20.0, pal().accent);
-        ui.label(strong(title, 17.0));
+        ui.label(strong(title, 17.0)).speak();
     });
 }
 
@@ -351,7 +375,7 @@ pub fn icon_text(ui: &mut egui::Ui, icon: Icon, text: RichText, color: Color32) 
     row(ui, |ui| {
         icons::show(ui, icon, 16.0, color);
         // النص الطويل (مثل المسارات) ينتقل لسطر جديد بدل تجاوز حافة البطاقة
-        ui.add(egui::Label::new(text).wrap(true));
+        ui.add(egui::Label::new(text).wrap(true)).speak();
     })
     .response
 }
@@ -486,7 +510,7 @@ pub fn toggle_row(ui: &mut egui::Ui, enabled: bool, on: &mut bool, title: &str, 
             response.on_hover_cursor(egui::CursorIcon::PointingHand);
         }
         column(ui, |ui| {
-            ui.label(strong(show(title), 15.0).color(if enabled { p.text } else { p.muted }));
+            ui.label(strong(show(title), 15.0).color(if enabled { p.text } else { p.muted })).speak();
             para(ui, help, 13.0, p.muted, false);
         });
     };
@@ -564,7 +588,7 @@ pub fn stat(ui: &mut egui::Ui, width: f32, icon: Icon, value: usize, label: &str
                     let x = if ar() { rect.right() - galley.size().x } else { rect.left() };
                     ui.painter().galley(egui::pos2(x, rect.center().y - galley.size().y / 2.0), galley, color);
                 });
-                ui.add(egui::Label::new(RichText::new(show(label)).small().color(p.muted)).truncate(!ar()));
+                ui.add(egui::Label::new(RichText::new(show(label)).small().color(p.muted)).truncate(!ar())).speak();
             });
         });
 }

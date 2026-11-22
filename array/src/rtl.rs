@@ -21,7 +21,7 @@ pub fn for_display(text: &str) -> String {
     if !has_arabic(&text) {
         return text;
     }
-    text.split('\\').map(|s| shape_segment(s, None)).collect::<Vec<_>>().join("\\")
+    remember(text.split('\\').map(|s| shape_segment(s, None)).collect::<Vec<_>>().join("\\"), &text)
 }
 
 /// جملة من الواجهة العربية: اتجاهها الأساسي من اليمين لليسار حتى لو بدأت بكلمة إنجليزية
@@ -31,7 +31,28 @@ pub fn rtl_line(text: &str) -> String {
     if !has_arabic(&text) {
         return text;
     }
-    shape_segment(&text, Some(Level::rtl()))
+    remember(shape_segment(&text, Some(Level::rtl())), &text)
+}
+
+thread_local! {
+    // النص المجهّز للرسم ← أصله، ليقرأ قارئ الشاشة الأصل لا الحروف المقلوبة
+    static ORIGINALS: std::cell::RefCell<std::collections::HashMap<String, String>> = Default::default();
+}
+
+fn remember(shown: String, original: &str) -> String {
+    ORIGINALS.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() > 4096 {
+            m.clear();
+        }
+        m.insert(shown.clone(), original.to_string());
+    });
+    shown
+}
+
+/// أصل نص مرّ بـ rtl_line أو for_display، إن كان قد مرّ بهما
+pub fn original(shown: &str) -> Option<String> {
+    ORIGINALS.with(|m| m.borrow().get(shown).cloned())
 }
 
 /// تقسيم نص إلى أسطر بترتيبه المنطقي قبل عكسه للعرض؛ الالتفاف بعد العكس يضع آخر الجملة
@@ -180,5 +201,14 @@ mod tests {
         // الجزء الأخير يُقرأ من اليمين: الاسم ثم (1) ثم الامتداد
         assert!(shown.ends_with(&second), "{shown:?}");
         assert!(shown.contains("mp3.(1)"), "{shown:?}");
+    }
+
+    #[test]
+    fn shaped_text_maps_back_to_its_original() {
+        let line = "راجع التغييرات";
+        assert_eq!(original(&rtl_line(line)).as_deref(), Some(line));
+        let path = r"صور\2025\شاشة.png";
+        assert_eq!(original(&for_display(path)).as_deref(), Some(path));
+        assert_eq!(original("never shown"), None);
     }
 }
