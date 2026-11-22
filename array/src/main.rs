@@ -1367,16 +1367,14 @@ impl ArrayApp {
 
             // البطاقات الثلاث متجاورة، والأولى عند بداية السطر
             let steps = [
-                (Icon::Folder, "1", tr("Choose a folder", "اختر مجلداً"), tr("Pick it with Browse or drag it onto the window.", "اختره بزر الاستعراض أو اسحبه إلى النافذة.")),
+                (Icon::Folder, tr("Choose a folder", "اختر مجلداً"), tr("Pick it with Browse or drag it onto the window.", "اختره بزر الاستعراض أو اسحبه إلى النافذة.")),
                 (
                     Icon::Search,
-                    "2",
                     tr("Review the preview", "راجع المعاينة"),
                     tr("See where every file will go. Nothing moves yet.", "ترى أين سيذهب كل ملف. لا يتحرك شيء بعد."),
                 ),
                 (
                     Icon::Check,
-                    "3",
                     tr("Organize — and undo anytime", "رتّب — وتراجع متى شئت"),
                     tr("Confirm to organize. The History page puts everything back.", "أكّد للترتيب. وصفحة السجل تعيد كل شيء كما كان."),
                 ),
@@ -1387,7 +1385,7 @@ impl ArrayApp {
             theme::row(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = gap;
                 ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
-                for (icon, number, title, body) in steps {
+                for (icon, title, body) in steps {
                     egui::Frame::none()
                         .fill(p.surface)
                         .stroke(egui::Stroke::new(1.0_f32, p.border))
@@ -1395,13 +1393,11 @@ impl ArrayApp {
                         .inner_margin(egui::Margin::same(20.0))
                         .show(ui, |ui| {
                             ui.set_width(card_width);
-                            ui.set_min_height(150.0);
                             theme::column(ui, |ui| {
                                 theme::row(ui, |ui| {
                                     let (rect, _) = ui.allocate_exact_size(egui::vec2(40.0, 40.0), egui::Sense::hover());
                                     ui.painter().circle_filled(rect.center(), 20.0, p.selected);
                                     icons::paint(ui.painter(), rect.shrink(10.0), icon, p.accent, 0.0);
-                                    ui.label(theme::strong(number, 22.0).color(p.accent));
                                 });
                                 ui.add_space(6.0);
                                 ui.label(theme::strong(theme::show(title), 16.0));
