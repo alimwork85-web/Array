@@ -1345,6 +1345,14 @@ impl ArrayApp {
                 self.set_option(|o| o.welcome_seen = false);
             }
             ui.add_space(14.0);
+            // رخصة OFL تشترط أن يصل نصها مع الخط المضمّن في البرنامج
+            ui.label(theme::muted(t("Font: IBM Plex Sans Arabic © 2017 IBM Corp.", "الخط: IBM Plex Sans Arabic © 2017 IBM Corp.")));
+            egui::CollapsingHeader::new(theme::show(tr("Font license (SIL OFL 1.1)", "رخصة الخط (SIL OFL 1.1)"))).show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                    ui.label(RichText::new(include_str!("../assets/fonts/OFL-IBMPlexSansArabic.txt")).small().color(p.muted));
+                });
+            });
+            ui.add_space(14.0);
         });
     }
 
