@@ -861,7 +861,17 @@ impl ArrayApp {
                 // دائرة خلف الأيقونة بلون النتيجة
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(40.0, 40.0), egui::Sense::hover());
                 ui.painter().circle_filled(rect.center(), 20.0, color.gamma_multiply(0.18));
-                icons::paint(ui.painter(), rect.shrink(9.0), icon, color, 0.0);
+                let icon_rect = rect.shrink(9.0);
+                if outcome.ok {
+                    // رسم العلامة تدريجيًا بالقص من أولها إلى آخرها في 350ms عند أول ظهور
+                    let id = ui.make_persistent_id(("outcome_check", outcome.message.as_str()));
+                    let t = theme::animated_value(ui.ctx(), id, 1.0, 0.35, 0.0);
+                    let edge = egui::lerp(icon_rect.left()..=icon_rect.right(), t);
+                    let clip = egui::Rect::from_min_max(icon_rect.min, egui::pos2(edge, icon_rect.bottom()));
+                    icons::paint(&ui.painter().with_clip_rect(clip), icon_rect, icon, color, 0.0);
+                } else {
+                    icons::paint(ui.painter(), icon_rect, icon, color, 0.0);
+                }
                 let first = outcome.message.lines().next().unwrap_or_default();
                 // الرمز في بداية السطر يظهر مرة واحدة في الأيقونة
                 let first = first.trim_start_matches(['✔', '↩', '⚠', '❌']).trim_start();
@@ -1038,25 +1048,21 @@ impl ArrayApp {
         }
 
         // إلى أين تذهب الملفات
-        let wrap_layout = if ar() {
-            egui::Layout::right_to_left(egui::Align::Min).with_main_wrap(true)
-        } else {
-            egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true)
-        };
-        ui.with_layout(wrap_layout, |ui| {
-            for (folder, n, existing, artists) in &preview.destinations {
-                let name = if folder == THIS_FOLDER { tr("This folder", "هذا المجلد").to_string() } else { folder.clone() };
-                // الاسم معزول حتى لا يلتصق به الرقم بعده فيُقرأ اسم إنجليزي مع أرقامه بالمقلوب في العربية
-                let mut label = format!("\u{2068}{name}\u{2069}  ·  {n}");
-                if *artists > 0 {
-                    label.push_str(&format!("  ·  {} {}", count(*artists, Noun::Folder), tr("inside", "بالداخل")));
-                } else if !existing {
-                    label.push_str(&format!("  ·  {}", tr("new", "جديد")));
-                }
-                let shown = if ar() { rtl::rtl_line(&label) } else { rtl::for_display(&label.replace(['\u{2068}', '\u{2069}'], "")) };
-                theme::chip(ui, category_icon(folder), &shown);
+        let mut chips: Vec<(Icon, String)> = Vec::new();
+        for (folder, n, existing, artists) in &preview.destinations {
+            let name = if folder == THIS_FOLDER { tr("This folder", "هذا المجلد").to_string() } else { folder.clone() };
+            // الاسم معزول حتى لا يلتصق به الرقم بعده فيُقرأ اسم إنجليزي مع أرقامه بالمقلوب في العربية
+            let mut label = format!("\u{2068}{name}\u{2069}  ·  {n}");
+            if *artists > 0 {
+                label.push_str(&format!("  ·  {} {}", count(*artists, Noun::Folder), tr("inside", "بالداخل")));
+            } else if !existing {
+                label.push_str(&format!("  ·  {}", tr("new", "جديد")));
             }
-        });
+            let shown = if ar() { rtl::rtl_line(&label) } else { rtl::for_display(&label.replace(['\u{2068}', '\u{2069}'], "")) };
+            chips.push((category_icon(folder), shown));
+        }
+        // يُوزَّع على سطور فلا يبقى سطر أخير بشارة واحدة
+        theme::chip_grid(ui, &chips);
         ui.add_space(4.0);
         if !preview.skipped.is_empty() {
             let label = if ar() {
@@ -1367,16 +1373,14 @@ impl ArrayApp {
 
             // البطاقات الثلاث متجاورة، والأولى عند بداية السطر
             let steps = [
-                (Icon::Folder, "1", tr("Choose a folder", "اختر مجلداً"), tr("Pick it with Browse or drag it onto the window.", "اختره بزر الاستعراض أو اسحبه إلى النافذة.")),
+                (Icon::Folder, tr("Choose a folder", "اختر مجلداً"), tr("Pick it with Browse or drag it onto the window.", "اختره بزر الاستعراض أو اسحبه إلى النافذة.")),
                 (
                     Icon::Search,
-                    "2",
                     tr("Review the preview", "راجع المعاينة"),
                     tr("See where every file will go. Nothing moves yet.", "ترى أين سيذهب كل ملف. لا يتحرك شيء بعد."),
                 ),
                 (
                     Icon::Check,
-                    "3",
                     tr("Organize — and undo anytime", "رتّب — وتراجع متى شئت"),
                     tr("Confirm to organize. The History page puts everything back.", "أكّد للترتيب. وصفحة السجل تعيد كل شيء كما كان."),
                 ),
@@ -1387,7 +1391,7 @@ impl ArrayApp {
             theme::row(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = gap;
                 ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
-                for (icon, number, title, body) in steps {
+                for (icon, title, body) in steps {
                     egui::Frame::none()
                         .fill(p.surface)
                         .stroke(egui::Stroke::new(1.0_f32, p.border))
@@ -1395,13 +1399,11 @@ impl ArrayApp {
                         .inner_margin(egui::Margin::same(20.0))
                         .show(ui, |ui| {
                             ui.set_width(card_width);
-                            ui.set_min_height(150.0);
                             theme::column(ui, |ui| {
                                 theme::row(ui, |ui| {
                                     let (rect, _) = ui.allocate_exact_size(egui::vec2(40.0, 40.0), egui::Sense::hover());
                                     ui.painter().circle_filled(rect.center(), 20.0, p.selected);
                                     icons::paint(ui.painter(), rect.shrink(10.0), icon, p.accent, 0.0);
-                                    ui.label(theme::strong(number, 22.0).color(p.accent));
                                 });
                                 ui.add_space(6.0);
                                 ui.label(theme::strong(theme::show(title), 16.0));

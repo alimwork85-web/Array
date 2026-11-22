@@ -381,13 +381,18 @@ pub fn button(ui: &mut egui::Ui, kind: Kind, icon: Option<Icon>, text: &str, ena
 
     let hovered = enabled && response.hovered();
     let pressed = enabled && response.is_pointer_button_down_on();
-    let (fill, fg, border) = match kind {
-        Kind::Primary if !enabled => (p.toggle_off, p.muted, Color32::TRANSPARENT),
-        Kind::Primary => (if hovered || pressed { p.primary_hover } else { p.primary }, Color32::WHITE, Color32::TRANSPARENT),
-        Kind::Secondary => (if pressed { p.selected } else if hovered { p.hover } else { p.chip }, if enabled { p.text } else { p.muted }, p.border),
-        Kind::Ghost => (if pressed { p.selected } else if hovered { p.hover } else { Color32::TRANSPARENT }, if enabled { p.text } else { p.muted }, Color32::TRANSPARENT),
+    // انتقال ناعم للون hover (200ms، أو فوري إذا كانت حركة النظام موقوفة)
+    let hover_time = if ui.style().animation_time > 0.0 { 0.2 } else { 0.0 };
+    let hover_t = ui.ctx().animate_bool_with_time(response.id, hovered || pressed, hover_time);
+    let (base, over, fg, border) = match kind {
+        Kind::Primary if !enabled => (p.toggle_off, p.toggle_off, p.muted, Color32::TRANSPARENT),
+        Kind::Primary => (p.primary, p.primary_hover, Color32::WHITE, Color32::TRANSPARENT),
+        Kind::Secondary => (p.chip, if pressed { p.selected } else { p.hover }, if enabled { p.text } else { p.muted }, p.border),
+        Kind::Ghost => (Color32::TRANSPARENT, if pressed { p.selected } else { p.hover }, if enabled { p.text } else { p.muted }, Color32::TRANSPARENT),
     };
-    let rect_drawn = if pressed { rect.shrink(1.0) } else { rect };
+    let fill = if enabled { lerp_color(base, over, hover_t) } else { base };
+    // الضغط يصغّر المرسوم إلى 0.97 حول المركز فقط؛ الحجم المحجوز لا يتغيّر
+    let rect_drawn = if pressed { egui::Rect::from_center_size(rect.center(), rect.size() * 0.97) } else { rect };
     ui.painter().rect(rect_drawn, 8.0, fill, Stroke::new(1.0_f32, border));
     if response.has_focus() {
         ui.painter().rect_stroke(rect.expand(2.0), 10.0, Stroke::new(2.0_f32, p.accent));
@@ -421,13 +426,16 @@ pub fn nav_item(ui: &mut egui::Ui, icon: Icon, text: &str, selected: bool, enabl
     let rtl = ar();
     if selected {
         ui.painter().rect_filled(rect, 8.0, p.selected);
-        let edge = if rtl { rect.right_center() - egui::vec2(3.0, 10.0) } else { rect.left_center() - egui::vec2(0.0, 10.0) };
+        // المؤشر ينتقل بنعومة بين العناصر: موضع y يُحفظ بمعرّف ثابت ويُحرَّك في 200ms
+        let y = animated_value(ui.ctx(), egui::Id::new("nav_indicator_y"), rect.center().y, 0.2, rect.center().y);
+        let edge = if rtl { egui::pos2(rect.right() - 3.0, y - 10.0) } else { egui::pos2(rect.left(), y - 10.0) };
         ui.painter().rect_filled(egui::Rect::from_min_size(edge, egui::vec2(3.0, 20.0)), 2.0, p.accent);
     } else if hovered {
         ui.painter().rect_filled(rect, 8.0, p.hover);
     }
     if response.has_focus() {
-        ui.painter().rect_stroke(rect, 8.0, Stroke::new(2.0_f32, p.accent));
+        // إطار التركيز للوحة المفاتيح: خط رفيع شبه شفاف، لا إطار سميك يغطي العنصر المختار
+        ui.painter().rect_stroke(rect.shrink(0.5), 8.0, Stroke::new(1.0_f32, p.accent.gamma_multiply(0.5)));
     }
     let color = if !enabled {
         p.muted.gamma_multiply(0.7)
@@ -496,7 +504,39 @@ pub fn toggle_row(ui: &mut egui::Ui, enabled: bool, on: &mut bool, title: &str, 
 
 fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
-    Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
+    // مخلوط مسبق الضرب، فينتقل الشفاف إلى لون hover بلا وميض أسود (زر Ghost)
+    Color32::from_rgba_premultiplied(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()), mix(a.a(), b.a()))
+}
+
+/// حركة قيمة واحدة بمعرّف ثابت وبمنحنى ease-out: تبدأ من `first` عند أول ظهور،
+/// وتعدّ من موضعها الحالي إذا تغيّر الهدف، وتصير فورية إذا كانت حركة النظام موقوفة
+/// (`animation_time == 0`). المدة بالثواني.
+pub fn animated_value(ctx: &egui::Context, id: egui::Id, target: f32, seconds: f32, first: f32) -> f32 {
+    let seconds = if ctx.style().animation_time > 0.0 { seconds } else { 0.0 };
+    if seconds <= 0.0 {
+        return target;
+    }
+    let now = ctx.input(|i| i.time);
+    let key = id.with("animated_value");
+    let (from, start) = match ctx.memory(|m| m.data.get_temp::<(f32, f64, f32)>(key)) {
+        None => (first, now),
+        Some((from, start, goal)) if goal != target => (from + (goal - from) * ease_out(progress(now, start, seconds)), now),
+        Some((from, start, _)) => (from, start),
+    };
+    let t = progress(now, start, seconds);
+    ctx.memory_mut(|m| m.data.insert_temp(key, (from, start, target)));
+    if t < 1.0 {
+        ctx.request_repaint();
+    }
+    from + (target - from) * ease_out(t)
+}
+
+fn progress(now: f64, start: f64, seconds: f32) -> f32 {
+    ((now - start) as f32 / seconds).clamp(0.0, 1.0)
+}
+
+fn ease_out(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
 }
 
 /// مربع إحصاء: أيقونة ورقم كبير ووصف (الوصف كما هو، يُجهّز هنا)
@@ -513,7 +553,16 @@ pub fn stat(ui: &mut egui::Ui, width: f32, icon: Icon, value: usize, label: &str
             column(ui, |ui| {
                 row(ui, |ui| {
                     icons::show(ui, icon, 18.0, color);
-                    ui.label(strong(value.to_string(), 24.0).color(color));
+                    // الصفر بلون باهت بدل لونه، والرقم يشغل عرض خاناته دائمًا فلا يهتز أثناء العد
+                    let color = if value == 0 { p.muted } else { color };
+                    // العد التصاعدي عند أول ظهور: 400ms استثناء صريح في الخطة، ومرة واحدة لكل بطاقة
+                    let counted = animated_value(ui.ctx(), ui.make_persistent_id(("stat", label)), value as f32, 0.4, 0.0);
+                    let font = FontId::new(24.0, FontFamily::Name(SEMIBOLD.into()));
+                    let cell = ui.painter().layout_no_wrap("0".repeat(value.to_string().len()), font.clone(), color).size().x;
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(cell, 28.0), egui::Sense::hover());
+                    let galley = ui.painter().layout_no_wrap((counted.round() as usize).to_string(), font, color);
+                    let x = if ar() { rect.right() - galley.size().x } else { rect.left() };
+                    ui.painter().galley(egui::pos2(x, rect.center().y - galley.size().y / 2.0), galley, color);
                 });
                 ui.add(egui::Label::new(RichText::new(show(label)).small().color(p.muted)).truncate(!ar()));
             });
@@ -531,6 +580,61 @@ pub fn chip(ui: &mut egui::Ui, icon: Icon, text: &str) {
     let icon_rect = egui::Rect::from_center_size(egui::pos2(icon_x, rect.center().y), egui::vec2(15.0, 15.0));
     icons::paint(ui.painter(), icon_rect, icon, p.accent, 0.0);
     ui.painter().galley(egui::pos2(text_x, rect.center().y - galley.size().y / 2.0), galley, p.text);
+}
+
+/// عرض شارة بنصها كما تُرسم
+pub fn chip_width(ui: &egui::Ui, text: &str) -> f32 {
+    ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(13.0), pal().text).size().x + 44.0
+}
+
+/// شارات في سطور: كل سطر يبدأ من بداية السطر، ولا يبقى في آخره شارة واحدة
+pub fn chip_grid(ui: &mut egui::Ui, chips: &[(Icon, String)]) {
+    let gap = ui.spacing().item_spacing.x;
+    let widths: Vec<f32> = chips.iter().map(|(_, text)| chip_width(ui, text)).collect();
+    for row in balanced_rows(&widths, gap, ui.available_width()) {
+        theme_row_chips(ui, &row, chips, gap);
+    }
+}
+
+fn theme_row_chips(ui: &mut egui::Ui, indices: &[usize], chips: &[(Icon, String)], gap: f32) {
+    row(ui, |ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        for &i in indices {
+            let (icon, text) = &chips[i];
+            chip(ui, *icon, text);
+        }
+    });
+}
+
+/// حزم العروض في سطور بترتيبها، ثم نقل شارة من السطر السابق إن بقي سطر أخير بشارة واحدة
+fn balanced_rows(widths: &[f32], gap: f32, avail: f32) -> Vec<Vec<usize>> {
+    let width_of = |row: &Vec<usize>| row.iter().map(|&i| widths[i]).sum::<f32>() + gap * (row.len() as f32 - 1.0);
+    let mut rows: Vec<Vec<usize>> = Vec::new();
+    let mut used = 0.0;
+    for (i, w) in widths.iter().enumerate() {
+        if let Some(row) = rows.last_mut() {
+            if used + gap + w <= avail {
+                used += gap + w;
+                row.push(i);
+                continue;
+            }
+        }
+        rows.push(vec![i]);
+        used = *w;
+    }
+    while rows.len() >= 2 {
+        let last = rows.len() - 1;
+        if rows[last].len() != 1 || rows[last - 1].len() < 2 {
+            break;
+        }
+        let moved = rows[last - 1].pop().expect("row is not empty");
+        rows[last].insert(0, moved);
+        if width_of(&rows[last]) > avail {
+            rows[last - 1].push(moved);
+            break;
+        }
+    }
+    rows
 }
 
 /// اختيار من عدة خيارات متجاورة (مثل: System / Light / Dark)، الأول عند بداية السطر
@@ -607,5 +711,46 @@ mod tests {
             assert!(contrast(Color32::WHITE, p.primary) >= 4.5, "white on primary: {:.2}", contrast(Color32::WHITE, p.primary));
             assert!(contrast(Color32::WHITE, p.primary_hover) >= 4.5);
         }
+    }
+
+    /// العد التصاعدي: يبدأ من الصفر، يتقدّم أسرع في أوله (ease-out)، وينتهي عند الهدف
+    #[test]
+    fn animated_value_counts_from_zero_to_target() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("count_test");
+        let sample = |time: f64| {
+            ctx.begin_frame(egui::RawInput { time: Some(time), ..Default::default() });
+            let value = animated_value(&ctx, id, 100.0, 0.4, 0.0);
+            let _ = ctx.end_frame();
+            value
+        };
+        assert_eq!(sample(0.0), 0.0);
+        let half = sample(0.2);
+        assert!(half > 50.0 && half < 100.0, "half = {half}");
+        assert_eq!(sample(1.0), 100.0);
+    }
+
+    /// الشارات: لا يبقى سطر أخير بشارة واحدة، والترتيب محفوظ
+    #[test]
+    fn chip_rows_never_leave_a_single_widow() {
+        let widths = [100.0, 100.0, 100.0, 100.0, 100.0];
+        let rows = balanced_rows(&widths, 10.0, 450.0);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], vec![0, 1, 2]);
+        assert_eq!(rows[1], vec![3, 4]);
+
+        // سطر واحد يتّسع لكل الشارات: لا تغيير
+        let rows = balanced_rows(&widths, 10.0, 1000.0);
+        assert_eq!(rows, vec![vec![0, 1, 2, 3, 4]]);
+    }
+
+    /// انتقال hover: الشفاف يبقى شفافًا في أوله ولا يقفز إلى اللون دفعة واحدة
+    #[test]
+    fn hover_mix_respects_alpha() {
+        let hover = Color32::from_rgb(0x24, 0x30, 0x40);
+        assert_eq!(lerp_color(Color32::TRANSPARENT, hover, 0.0).a(), 0);
+        let mid = lerp_color(Color32::TRANSPARENT, hover, 0.5);
+        assert!(mid.a() > 0 && mid.a() < 255);
+        assert_eq!(lerp_color(Color32::RED, Color32::GREEN, 1.0), Color32::GREEN);
     }
 }
