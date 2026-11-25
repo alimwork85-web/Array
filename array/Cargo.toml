@@ -1,6 +1,7 @@
 [package]
 name = "array"
-version = "2.1.6"
+version = "2.2.0"
+authors = ["Ali Alhumedi"]
 edition = "2021"
 
 # اسم البرنامج النهائي: Array.exe

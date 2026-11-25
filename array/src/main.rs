@@ -587,6 +587,8 @@ impl ArrayApp {
             Ok(msg)
         });
         self.last_stats = None;
+        // التراجع يغيّر الملفات: خطة المعاينة المفتوحة لم تعد صحيحة
+        self.preview = None;
         self.job = Some(Job::Moving { restoring: true, rx, progress, total, folder: job_folder });
         self.page = Page::Organize;
         self.status_message = format!("⏳ {}", tr("Restoring files… please wait", "جارٍ إعادة الملفات… لحظات"));
@@ -667,16 +669,16 @@ impl ArrayApp {
         });
         ui.add_space(34.0);
 
-        let busy = self.busy();
+        // أثناء العمل على الملفات تبقى صفحة التنظيم ظاهرة؛ المعاينة لا تمنع التنقل
+        let busy = self.job.is_some() || self.confirm_undo;
         for (page, icon, en, arabic) in [
             (Page::Organize, Icon::Organize, "Organize", "التنظيم"),
             (Page::History, Icon::History, "History", "السجل"),
             (Page::Settings, Icon::Settings, "Settings", "الإعدادات"),
             (Page::About, Icon::About, "About", "حول"),
         ] {
-            // أثناء المعاينة أو العمل تبقى صفحة التنظيم ظاهرة
             if theme::nav_item(ui, icon, tr(en, arabic), self.page == page, !busy || page == Page::Organize).clicked() {
-                self.page = page;
+                self.go_to(ui.ctx(), page);
             }
             ui.add_space(2.0);
         }
@@ -685,6 +687,16 @@ impl ArrayApp {
             ui.label(theme::muted(t(&format!("Version {}", VERSION), &format!("الإصدار {}", VERSION))).small()).speak();
             theme::icon_text(ui, Icon::Lock, theme::muted(t("Works offline on this PC", "يعمل دون إنترنت على جهازك")).small(), p.muted);
         });
+    }
+
+    fn go_to(&mut self, ctx: &egui::Context, page: Page) {
+        // الإعدادات أو الملفات قد تغيّرت في صفحة أخرى: العودة إلى المعاينة تعيد الفحص فلا تُنفَّذ خطة قديمة
+        if page == Page::Organize && self.page != Page::Organize {
+            if let Some(preview) = self.preview.take() {
+                self.start_planning(ctx, preview.plan.source);
+            }
+        }
+        self.page = page;
     }
 
     fn page_header(ui: &mut egui::Ui, title: &str, subtitle: &str) {
@@ -715,7 +727,8 @@ impl ArrayApp {
         );
         let p = pal();
 
-        egui::ScrollArea::vertical().auto_shrink([false, false]).max_height((ui.available_height() - 60.0).max(120.0)).show(ui, |ui| {
+        let view_height = (ui.available_height() - 60.0).max(120.0);
+        theme::page_scroll(ui, "organize_body", view_height, |ui| {
             theme::column(ui, |ui| {
                 if let Some(outcome) = self.outcome.take() {
                     if self.outcome_view(ui, &outcome) {
@@ -1003,149 +1016,158 @@ impl ArrayApp {
             ),
         );
 
-        // الأرقام الأساسية
-        theme::row(ui, |ui| {
-            // عرض كل مربع = (المتاح - هوامش الإطار 3×28 - المسافتان بينها) ÷ 3، فيملأ الصف العرض كله
-            let width = ((ui.available_width() - 3.0 * 28.0 - 2.0 * ui.spacing().item_spacing.x) / 3.0).max(100.0);
-            theme::stat(ui, width, Icon::ArrowRight, plan.moves.len(), tr("to move or rename", "للنقل أو إعادة التسمية"), p.accent);
-            theme::stat(ui, width, Icon::Check, plan.kept_in_folders + plan.in_place, tr("stay where they are", "تبقى في مكانها"), p.text);
-            theme::stat(ui, width, Icon::Shield, plan.skipped.len(), tr("protected folders", "مجلدات محمية"), p.success);
-        });
-        ui.add_space(12.0);
-
-        // نسخ مكررة: لا حذف، تذهب إلى «مكررات للمراجعة»
-        if plan.duplicates > 0 {
-            let note = if ar() {
-                format!(
-                    "{} إلى «مكررات للمراجعة» — لا حذف، ويمكن التراجع.",
-                    count(plan.duplicates, Noun::File)
-                )
-            } else {
-                format!(
-                    "{} go to the review folder — nothing is deleted, and you can undo.",
-                    count(plan.duplicates, Noun::File)
-                )
-            };
-            ui.label(theme::muted(rtl::for_display(&note))).speak();
-            ui.add_space(6.0);
-        }
-
-        // مجلد سحابي: النقل فيه يعني رفعاً وتنزيلاً
-        if let Some(provider) = SafetyChecker::cloud_provider(&plan.source) {
-            let warning = if ar() {
-                format!(
-                    "⚠ هذا المجلد داخل {provider}: النقل فيه يعني رفعاً وتنزيلاً. العمليات المتوقعة: {}.",
-                    count(plan.moves.len(), Noun::File)
-                )
-            } else {
-                format!(
-                    "⚠ This folder is inside {provider}: moving files there means uploading and downloading. Expected operations: {}.",
-                    count(plan.moves.len(), Noun::File)
-                )
-            };
-            ui.label(theme::muted(rtl::for_display(&warning))).speak();
-            ui.add_space(6.0);
-        }
-
-        // إلى أين تذهب الملفات
-        let mut chips: Vec<(Icon, String)> = Vec::new();
-        for (folder, n, existing, artists) in &preview.destinations {
-            let name = if folder == THIS_FOLDER { tr("This folder", "هذا المجلد").to_string() } else { folder.clone() };
-            // الاسم معزول حتى لا يلتصق به الرقم بعده فيُقرأ اسم إنجليزي مع أرقامه بالمقلوب في العربية
-            let mut tail = format!("  ·  {n}");
-            if *artists > 0 {
-                tail.push_str(&format!("  ·  {} {}", count(*artists, Noun::Folder), tr("inside", "بالداخل")));
-            } else if !existing {
-                tail.push_str(&format!("  ·  {}", tr("new", "جديد")));
-            }
-            // في الإنجليزية يُجهَّز الاسم وحده؛ لو مرّ السطر كله باتجاه الاسم العربي لانقلب ترتيبه
-            let shown = if ar() { rtl::rtl_line(&format!("\u{2068}{name}\u{2069}{tail}")) } else { format!("{}{tail}", rtl::for_display(&name)) };
-            chips.push((category_icon(folder), shown));
-        }
-        // يُوزَّع على سطور فلا يبقى سطر أخير بشارة واحدة
-        theme::chip_grid(ui, &chips);
-        ui.add_space(4.0);
-        if !preview.skipped.is_empty() {
-            let label = if ar() {
-                format!("{} لن يُلمس", count(preview.skipped.len(), Noun::ProtectedFolder))
-            } else {
-                format!("{} will not be touched", count(preview.skipped.len(), Noun::ProtectedFolder))
-            };
-            let response = theme::row(ui, |ui| {
-                icons::show(ui, Icon::Shield, 16.0, p.success);
-                ui.add(egui::Label::new(RichText::new(theme::show(&label)).color(p.success)).sense(egui::Sense::click())).speak()
-            })
-            .inner;
-            if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                toggle_skipped = true;
-            }
-            if self.show_skipped {
-                egui::ScrollArea::vertical().id_source("skipped_list").max_height(90.0).show(ui, |ui| {
-                    theme::column(ui, |ui| {
-                        for line in &preview.skipped {
-                            ui.label(RichText::new(rtl::for_display(line)).small()).speak();
-                        }
-                    });
+        // المحتوى يُمرَّر، وأزرار القرار مثبّتة أسفله فتبقى ظاهرة دائماً
+        let mut toggled = None;
+        let view_height = (ui.available_height() - 60.0).max(120.0);
+        theme::page_scroll(ui, "preview_body", view_height, |ui| {
+            theme::column(ui, |ui| {
+                // الأرقام الأساسية
+                theme::row(ui, |ui| {
+                    // عرض كل مربع = (المتاح - هوامش الإطار 3×28 - المسافتان بينها) ÷ 3، فيملأ الصف العرض كله
+                    let width = ((ui.available_width() - 3.0 * 28.0 - 2.0 * ui.spacing().item_spacing.x) / 3.0).max(100.0);
+                    theme::stat(ui, width, Icon::ArrowRight, plan.moves.len(), tr("to move or rename", "للنقل أو إعادة التسمية"), p.accent);
+                    theme::stat(ui, width, Icon::Check, plan.kept_in_folders + plan.in_place, tr("stay where they are", "تبقى في مكانها"), p.text);
+                    theme::stat(ui, width, Icon::Shield, plan.skipped.len(), tr("protected folders", "مجلدات محمية"), p.success);
                 });
-            }
-        }
-        ui.add_space(10.0);
+                ui.add_space(12.0);
 
-        // ملخص: بطاقة لكل فئة ولكل مجموعة تسمية وللمكررات
-        if !preview.plan.left.is_empty() {
-            let note = format!(
-                "{} {}",
-                count(preview.plan.left.len(), Noun::File),
-                tr("stay where they are: their category is switched off.", "تبقى في مكانها: فئتها موقوفة.")
-            );
-            ui.label(theme::muted(rtl::for_display(&note))).speak();
-            ui.add_space(6.0);
-        }
-        let (show_all, toggled) = if self.show_all { (false, None) } else { summary_cards(ui, &preview.plan, &self.options) };
-        if show_all {
-            self.show_all = true;
-        }
-        ui.add_space(8.0);
+                // نسخ مكررة: لا حذف، تذهب إلى «مكررات للمراجعة»
+                if plan.duplicates > 0 {
+                    let note = if ar() {
+                        format!(
+                            "{} إلى «مكررات للمراجعة» — لا حذف، ويمكن التراجع.",
+                            count(plan.duplicates, Noun::File)
+                        )
+                    } else {
+                        format!(
+                            "{} go to the review folder — nothing is deleted, and you can undo.",
+                            count(plan.duplicates, Noun::File)
+                        )
+                    };
+                    ui.label(theme::muted(rtl::for_display(&note))).speak();
+                    ui.add_space(6.0);
+                }
 
-        if self.show_all {
-        // الجدول
-        let row_height = ui.text_style_height(&egui::TextStyle::Body) + 12.0;
-        let table_height = (ui.available_height() - 100.0).max(row_height * 4.0);
-        theme::card(ui, |ui| {
-            let column = ((ui.available_width() - 100.0) / 2.0).max(60.0);
-            theme::row(ui, |ui| {
-                table_cell(ui, column, 20.0, &t("CURRENT LOCATION", "المكان الحالي"), p.muted, true);
-                ui.add_space(20.0);
-                table_cell(ui, column, 20.0, &t("NEW LOCATION", "المكان الجديد"), p.muted, true);
-            });
-            ui.add(egui::Separator::default().spacing(10.0));
-            egui::ScrollArea::vertical()
-                .max_height(table_height - 56.0)
-                .auto_shrink([false, false])
-                .show_rows(ui, row_height, preview.rows.len(), |ui, range| {
-                    let start = range.start;
-                    for (i, (from, to)) in preview.rows[range].iter().enumerate() {
-                        let rect = ui.available_rect_before_wrap();
-                        if (start + i) % 2 == 1 {
-                            ui.painter().rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), row_height)), 6.0, p.stripe);
+                // مجلد سحابي: النقل فيه يعني رفعاً وتنزيلاً
+                if let Some(provider) = SafetyChecker::cloud_provider(&plan.source) {
+                    let warning = if ar() {
+                        format!(
+                            "⚠ هذا المجلد داخل {provider}: النقل فيه يعني رفعاً وتنزيلاً. العمليات المتوقعة: {}.",
+                            count(plan.moves.len(), Noun::File)
+                        )
+                    } else {
+                        format!(
+                            "⚠ This folder is inside {provider}: moving files there means uploading and downloading. Expected operations: {}.",
+                            count(plan.moves.len(), Noun::File)
+                        )
+                    };
+                    ui.label(theme::muted(rtl::for_display(&warning))).speak();
+                    ui.add_space(6.0);
+                }
+
+                // إلى أين تذهب الملفات
+                let mut chips: Vec<(Icon, String)> = Vec::new();
+                for (folder, n, existing, artists) in &preview.destinations {
+                    let name = if folder == THIS_FOLDER { tr("This folder", "هذا المجلد").to_string() } else { folder.clone() };
+                    // الاسم معزول حتى لا يلتصق به الرقم بعده فيُقرأ اسم إنجليزي مع أرقامه بالمقلوب في العربية
+                    let mut tail = format!("  ·  {n}");
+                    if *artists > 0 {
+                        tail.push_str(&format!("  ·  {} {}", count(*artists, Noun::Folder), tr("inside", "بالداخل")));
+                    } else if !existing {
+                        tail.push_str(&format!("  ·  {}", tr("new", "جديد")));
+                    }
+                    // في الإنجليزية يُجهَّز الاسم وحده؛ لو مرّ السطر كله باتجاه الاسم العربي لانقلب ترتيبه
+                    let shown = if ar() { rtl::rtl_line(&format!("\u{2068}{name}\u{2069}{tail}")) } else { format!("{}{tail}", rtl::for_display(&name)) };
+                    chips.push((category_icon(folder), shown));
+                }
+                // يُوزَّع على سطور فلا يبقى سطر أخير بشارة واحدة
+                theme::chip_grid(ui, &chips);
+                ui.add_space(4.0);
+                if !preview.skipped.is_empty() {
+                    let label = if ar() {
+                        format!("{} لن يُلمس", count(preview.skipped.len(), Noun::ProtectedFolder))
+                    } else {
+                        format!("{} will not be touched", count(preview.skipped.len(), Noun::ProtectedFolder))
+                    };
+                    let response = theme::row(ui, |ui| {
+                        icons::show(ui, Icon::Shield, 16.0, p.success);
+                        ui.add(egui::Label::new(RichText::new(theme::show(&label)).color(p.success)).sense(egui::Sense::click())).speak()
+                    })
+                    .inner;
+                    if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        toggle_skipped = true;
+                    }
+                    if self.show_skipped {
+                        egui::ScrollArea::vertical().id_source("skipped_list").max_height(90.0).show(ui, |ui| {
+                            theme::column(ui, |ui| {
+                                for line in &preview.skipped {
+                                    ui.label(RichText::new(rtl::for_display(line)).small()).speak();
+                                }
+                            });
+                        });
+                    }
+                }
+                ui.add_space(10.0);
+
+                // ملخص: بطاقة لكل فئة ولكل مجموعة تسمية وللمكررات
+                if !preview.plan.left.is_empty() {
+                    let note = format!(
+                        "{} {}",
+                        count(preview.plan.left.len(), Noun::File),
+                        tr("stay where they are: their category is switched off.", "تبقى في مكانها: فئتها موقوفة.")
+                    );
+                    ui.label(theme::muted(rtl::for_display(&note))).speak();
+                    ui.add_space(6.0);
+                }
+                let show_all;
+                (show_all, toggled) = if self.show_all { (false, None) } else { summary_cards(ui, &preview.plan, &self.options) };
+                if show_all {
+                    self.show_all = true;
+                }
+                ui.add_space(8.0);
+
+                if self.show_all {
+                // الجدول
+                let row_height = ui.text_style_height(&egui::TextStyle::Body) + 12.0;
+                theme::card(ui, |ui| {
+                    let column = ((ui.available_width() - 100.0) / 2.0).max(60.0);
+                    theme::row(ui, |ui| {
+                        table_cell(ui, column, 20.0, &t("CURRENT LOCATION", "المكان الحالي"), p.muted, true);
+                        ui.add_space(20.0);
+                        table_cell(ui, column, 20.0, &t("NEW LOCATION", "المكان الجديد"), p.muted, true);
+                    });
+                    ui.add(egui::Separator::default().spacing(10.0));
+                    // تُرسم الصفوف الظاهرة فقط، وتمرير الصفحة يحرّكها (لا تمرير داخل تمرير)
+                    let pitch = row_height + ui.spacing().item_spacing.y;
+                    let width = ui.available_width();
+                    let (_, area) = ui.allocate_space(egui::vec2(width, pitch * preview.rows.len() as f32));
+                    let clip = ui.clip_rect();
+                    let first = ((clip.top() - area.top()) / pitch).max(0.0) as usize;
+                    let end = (((clip.bottom() - area.top()) / pitch).max(0.0).ceil() as usize).min(preview.rows.len());
+                    for i in first..end {
+                        let (from, to) = &preview.rows[i];
+                        let rect = egui::Rect::from_min_size(area.min + egui::vec2(0.0, i as f32 * pitch), egui::vec2(width, row_height));
+                        if i % 2 == 1 {
+                            ui.painter().rect_filled(rect, 6.0, p.stripe);
                         }
-                        theme::row(ui, |ui| {
+                        let mut row_ui = ui.child_ui_with_id_source(rect, *ui.layout(), i);
+                        theme::row(&mut row_ui, |ui| {
                             table_cell(ui, column, row_height, from, p.muted, false);
                             icons::show(ui, Icon::ArrowRight, 16.0, p.accent);
-                            table_cell(ui, column, row_height, &to, p.text, false);
+                            table_cell(ui, column, row_height, to, p.text, false);
                         });
                     }
                 });
+                }
+            });
         });
         ui.add_space(12.0);
-
-        }
         theme::row(ui, |ui| {
             let label = format!("{} {}", tr("Organize", "رتّب"), count(preview.rows.len(), Noun::File));
             if theme::button(ui, Kind::Primary, Some(Icon::Check), &label, true).clicked() {
                 decision = Some(true);
             }
-            if theme::button(ui, Kind::Secondary, Some(Icon::Close), tr("Cancel", "إلغاء"), true).clicked() {
+            if theme::button(ui, Kind::Secondary, None, tr("Back", "رجوع"), true).clicked() {
                 decision = Some(false);
             }
             let view_label = if self.show_all { tr("Summary", "الملخص") } else { tr("Show all", "عرض الكل") };
@@ -1232,7 +1254,7 @@ impl ArrayApp {
 
     fn settings_page(&mut self, ui: &mut egui::Ui) {
         Self::page_header(ui, tr("Settings", "الإعدادات"), tr("Saved automatically and used from the next preview.", "تُحفظ تلقائياً وتُستخدم من المعاينة التالية."));
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        theme::page_scroll(ui, "settings_body", ui.available_height(), |ui| {
             theme::column(ui, |ui| {
                 theme::card(ui, |ui| {
                     theme::section_title(ui, Icon::About, &t("Language", "اللغة"));
@@ -1319,6 +1341,7 @@ impl ArrayApp {
             ui.add_space(6.0);
             ui.label(theme::strong(t("Array", "نضيد"), 32.0)).speak();
             ui.label(theme::muted(t(&format!("Version {}", VERSION), &format!("الإصدار {}", VERSION)))).speak();
+            ui.label(theme::muted(t("Developed and published by Ali Alhumedi", "تطوير ونشر: Ali Alhumedi"))).speak();
             ui.add_space(14.0);
             for (en, arabic) in [
                 ("Gathers scattered files and puts them in tidy folders —", "يجمع الملفات المبعثرة ويضعها في مجلدات مرتبة —"),
@@ -1371,7 +1394,7 @@ impl ArrayApp {
     /// شاشة الترحيب في أول تشغيل: اختيار اللغة والخطوات الثلاث
     fn welcome_screen(&mut self, ui: &mut egui::Ui) {
         let p = pal();
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        theme::page_scroll(ui, "welcome_body", ui.available_height(), |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(24.0);
                 if let Some(logo) = &self.logo {
@@ -1465,7 +1488,7 @@ impl ArrayApp {
                 ui.add_space(14.0);
                 if theme::button(ui, Kind::Primary, Some(Icon::ArrowRight), tr("Get started", "ابدأ"), true).clicked() {
                     self.set_option(|o| o.welcome_seen = true);
-                    self.page = Page::Organize;
+                    self.go_to(ui.ctx(), Page::Organize);
                 }
                 ui.add_space(20.0);
             });
@@ -1865,6 +1888,34 @@ fn table_cell(ui: &mut egui::Ui, width: f32, height: f32, text: &str, color: egu
 }
 
 impl eframe::App for ArrayApp {
+    /// أسهم لوحة المفاتيح وPage Up/Down وHome/End تمرّر الصفحة الظاهرة (لا حقول نص في البرنامج)
+    fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        if self.confirm_undo || self.confirm_trash {
+            return;
+        }
+        let page = ctx.screen_rect().height() * 0.7;
+        // يُسحب المفتاح من egui حتى لا ينقل التركيز بدل التمرير
+        input.events.retain(|event| {
+            let egui::Event::Key { key, pressed, modifiers, .. } = event else { return true };
+            if modifiers.any() {
+                return true;
+            }
+            let delta = match key {
+                egui::Key::ArrowDown => 60.0,
+                egui::Key::ArrowUp => -60.0,
+                egui::Key::PageDown => page,
+                egui::Key::PageUp => -page,
+                egui::Key::End => f32::INFINITY,
+                egui::Key::Home => f32::NEG_INFINITY,
+                _ => return true,
+            };
+            if *pressed {
+                theme::scroll_page_by(ctx, delta);
+            }
+            false
+        });
+    }
+
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // السمة: تتبع ويندوز أو اختيار المستخدم
         let dark = match self.options.appearance.as_str() {
@@ -1968,9 +2019,13 @@ impl ArrayApp {
                 }
                 theme::column(ui, |ui| match self.page {
                     Page::Organize => self.organize_page(ui, ctx),
-                    Page::History => self.history_page(ui),
+                    Page::History => theme::page_scroll(ui, "history_page", ui.available_height(), |ui| {
+                        theme::column(ui, |ui| self.history_page(ui));
+                    }),
                     Page::Settings => self.settings_page(ui),
-                    Page::About => self.about_page(ui),
+                    Page::About => theme::page_scroll(ui, "about_page", ui.available_height(), |ui| {
+                        theme::column(ui, |ui| self.about_page(ui));
+                    }),
                 });
             });
     }
@@ -2036,6 +2091,136 @@ mod tests {
         assert_eq!(app.outcome.as_ref().map(|o| o.ok), Some(true), "{}", app.status_message);
         assert_eq!(tree(&root), before, "التراجع لم يعيد الشجرة كما كانت");
         assert_eq!(app.undo_count, None, "زر التراجع بقي بعد نجاحه");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// صفحة المراجعة في أصغر نافذة ببطاقات كثيرة: أزرار القرار داخل النافذة والقائمة الجانبية تعمل
+    #[test]
+    fn preview_buttons_stay_visible_and_sidebar_works() {
+        let root = temp_tree("ui_preview", &["1.pdf", "clip.mp4", "sea.jpg", "a.mp3", "b.zip", "c.txt"]);
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        theme::apply(&ctx, true);
+        ctx.enable_accesskit();
+        let mut app = ArrayApp::new(&ctx, Storage::at(temp_tree("ui_preview_appdata", &[])));
+        app.select_folder(root.clone());
+        app.start_planning(&ctx, root.clone());
+        wait_for_job(&mut app);
+        let files = app.preview.as_ref().unwrap().rows.len();
+        let decide = format!("{} {}", tr("Organize", "رتّب"), count(files, Noun::File));
+        let back = tr("Back", "رجوع");
+
+        let screen = egui::vec2(900.0, 620.0);
+        for show_all in [false, true] {
+            app.show_all = show_all;
+            let mut nodes = Vec::new();
+            for _ in 0..4 {
+                let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)), ..Default::default() };
+                let out = ctx.run(input, |ctx| app.page_panels(ctx));
+                nodes = out.platform_output.accesskit_update.unwrap().nodes;
+            }
+            for label in [decide.as_str(), back] {
+                let bounds = nodes
+                    .iter()
+                    .filter(|(_, n)| n.role() == egui::accesskit::Role::Button)
+                    .find(|(_, n)| n.name() == Some(label))
+                    .and_then(|(_, n)| n.bounds())
+                    .unwrap_or_else(|| panic!("لا يوجد زر: {label}"));
+                assert!(bounds.y1 <= screen.y as f64 - 24.0, "الزر {label} خارج النافذة: {bounds:?}");
+            }
+        }
+
+        // التمرير يصل إلى آخر بطاقة: آخر مفتاح يدخل الشاشة فوق شريط الأزرار
+        app.show_all = false;
+        let mut last = f64::MAX;
+        for frame in 0..60 {
+            let pos = egui::pos2(300.0, 350.0);
+            let mut input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)), ..Default::default() };
+            input.events.push(egui::Event::PointerMoved(pos));
+            if frame < 30 {
+                input.events.push(egui::Event::Scroll(egui::vec2(0.0, -200.0)));
+            }
+            let out = ctx.run(input, |ctx| app.page_panels(ctx));
+            let toggles = out.platform_output.accesskit_update.unwrap().nodes;
+            last = toggles
+                .iter()
+                .filter(|(_, n)| n.name() == Some(tr("Included", "مشمول")))
+                .filter_map(|(_, n)| n.bounds())
+                .map(|b| b.y1)
+                .fold(f64::MIN, f64::max);
+        }
+        assert!(last > 0.0 && last < screen.y as f64 - 90.0, "آخر بطاقة لا يصل إليها التمرير: {last}");
+
+        // التنقل متاح، والرجوع إلى التنظيم يعيد الفحص فلا تُنفَّذ خطة قديمة
+        app.go_to(&ctx, Page::Settings);
+        assert!(app.page == Page::Settings && app.preview.is_some());
+        fs::remove_file(root.join("1.pdf")).unwrap();
+        app.go_to(&ctx, Page::Organize);
+        assert!(app.preview.is_none());
+        wait_for_job(&mut app);
+        assert_eq!(app.preview.as_ref().unwrap().rows.len(), files - 1);
+
+        // التراجع يغيّر الملفات: تُغلق المعاينة القديمة
+        app.start_undo(&ctx);
+        assert!(app.preview.is_none());
+        wait_for_job(&mut app);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// كل صفحة تتمرر بالأسهم، وبإصبعين على لوحة اللمس أينما كان المؤشر، وبالسحب
+    #[test]
+    fn every_page_scrolls_with_keys_touchpad_and_drag() {
+        let root = temp_tree("ui_scroll", &["1.pdf", "clip.mp4", "sea.jpg", "a.mp3", "b.zip", "c.txt"]);
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        theme::apply(&ctx, true);
+        let mut app = ArrayApp::new(&ctx, Storage::at(temp_tree("ui_scroll_appdata", &[])));
+        app.select_folder(root.clone());
+        app.start_planning(&ctx, root.clone());
+        wait_for_job(&mut app);
+
+        let frames = |app: &mut ArrayApp, events: Vec<egui::Event>| {
+            for n in 0..40 {
+                // ارتفاع صغير حتى يزيد محتوى كل صفحة على النافذة
+                let screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 330.0)));
+                let mut input = egui::RawInput { screen_rect, ..Default::default() };
+                input.events.extend(events.get(n).cloned());
+                eframe::App::raw_input_hook(app, &ctx, &mut input);
+                let _ = ctx.run(input, |ctx| app.page_panels(ctx));
+            }
+            ctx.data(|d| d.get_temp::<f32>(theme::page_offset_id())).unwrap()
+        };
+        let key = |key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() };
+        let pages = [
+            ("review", Page::Organize, false),
+            ("table", Page::Organize, true),
+            ("history", Page::History, false),
+            ("settings", Page::Settings, false),
+            ("about", Page::About, false),
+        ];
+        for (name, page, show_all) in pages {
+            app.page = page;
+            app.show_all = show_all;
+            frames(&mut app, vec![]);
+            assert_eq!(frames(&mut app, vec![key(egui::Key::Home)]), 0.0, "{name}: Home");
+            assert!(frames(&mut app, vec![key(egui::Key::ArrowDown)]) > 5.0, "{name}: ArrowDown");
+            assert!(frames(&mut app, vec![key(egui::Key::ArrowUp)]) < 0.5, "{name}: ArrowUp");
+            assert!(frames(&mut app, vec![key(egui::Key::End)]) > 5.0, "{name}: End");
+            frames(&mut app, vec![key(egui::Key::Home)]);
+            // إصبعان على لوحة اللمس (خطوات صغيرة): فوق الصفحة، ثم العنوان، ثم القائمة الجانبية
+            for at in [egui::pos2(300.0, 200.0), egui::pos2(300.0, 40.0), egui::pos2(if ar() { 860.0 } else { 40.0 }, 40.0)] {
+                let mut events = vec![egui::Event::PointerMoved(at)];
+                events.extend((0..20).map(|_| egui::Event::Scroll(egui::vec2(0.0, -3.0))));
+                assert!(frames(&mut app, events) > 5.0, "{name}: touchpad {at:?}");
+                frames(&mut app, vec![key(egui::Key::Home)]);
+            }
+            // سحب بالإصبع من مكان فارغ في الصفحة
+            let press = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+            let at = |y| egui::pos2(if ar() { 40.0 } else { 260.0 }, y);
+            let moved = |y| egui::Event::PointerMoved(at(y));
+            let events = vec![moved(200.0), press(at(200.0), true), moved(170.0), moved(140.0), press(at(140.0), false)];
+            assert!(frames(&mut app, events) > 5.0, "{name}: drag");
+        }
         fs::remove_dir_all(&root).unwrap();
     }
 

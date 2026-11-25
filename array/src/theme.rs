@@ -352,6 +352,54 @@ pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
         .inner
 }
 
+fn page_scroll_id() -> egui::Id {
+    egui::Id::new("page-scroll-pending")
+}
+
+/// موضع تمرير الصفحة الظاهرة (للاختبارات)
+#[cfg(test)]
+pub fn page_offset_id() -> egui::Id {
+    egui::Id::new("page-scroll-offset")
+}
+
+/// يطلب تمرير الصفحة الظاهرة بهذا القدر (موجب = لأسفل، لا نهائي = إلى الطرف)
+pub fn scroll_page_by(ctx: &egui::Context, delta: f32) {
+    ctx.data_mut(|d| {
+        let pending = d.get_temp_mut_or_default::<f32>(page_scroll_id());
+        *pending = if pending.is_finite() { *pending + delta } else { delta };
+    });
+    ctx.request_repaint();
+}
+
+/// منطقة تمرير الصفحة: عجلة الفأرة ولوحة اللمس أينما كان المؤشر، والسحب، ولوحة المفاتيح
+pub fn page_scroll(ui: &mut egui::Ui, id: &str, height: f32, add: impl FnOnce(&mut egui::Ui)) {
+    let mut out = egui::ScrollArea::vertical().id_source(id).auto_shrink([false, false]).max_height(height).show(ui, add);
+    let ctx = ui.ctx().clone();
+
+    // المؤشر فوق القائمة أو شريط الأزرار: ما لم تستهلكه منطقة أخرى يمرّر الصفحة، إلا تحت نافذة تأكيد
+    let pointer = ctx.input(|i| i.pointer.hover_pos());
+    let free = pointer.is_some_and(|pos| ctx.layer_id_at(pos).map_or(true, |layer| layer == ui.layer_id()));
+    let wheel = if free { ctx.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta.y)) } else { 0.0 };
+
+    // المفاتيح: جزء من المسافة في كل إطار فيكون التمرير ناعماً (فوري إذا أُغلقت الحركة في ويندوز)
+    let pending = ctx.data_mut(|d| d.remove_temp::<f32>(page_scroll_id())).unwrap_or(0.0);
+    let smooth = ctx.style().animation_time > 0.0 && pending.is_finite() && pending.abs() > 1.0;
+    let step = if smooth { pending * 0.35 } else { pending };
+    if step != 0.0 || wheel != 0.0 {
+        let max = (out.content_size.y - out.inner_rect.height()).max(0.0);
+        let before = out.state.offset.y;
+        out.state.offset.y = (before + step - wheel).clamp(0.0, max);
+        out.state.store(&ctx, out.id);
+        // عند الطرف لا يبقى شيء معلّق
+        if smooth && out.state.offset.y != before {
+            scroll_page_by(&ctx, pending - step);
+        }
+        ctx.request_repaint();
+    }
+    #[cfg(test)]
+    ctx.data_mut(|d| d.insert_temp(page_offset_id(), out.state.offset.y));
+}
+
 /// عنوان خطوة: رقم في دائرة ثم نص (النص يُمرَّر جاهزاً للرسم)
 pub fn step_title(ui: &mut egui::Ui, number: &str, title: &str) {
     row(ui, |ui| {
