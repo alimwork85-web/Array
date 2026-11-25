@@ -16,7 +16,7 @@
 
 <p align="center">
   برنامج لويندوز يجمع ملفاتك المبعثرة ويرتّبها في مجلدات واضحة:<br>
-  الصور في مجلد كل شخص، والتلاوات والأغاني في مجلد كل قارئ وفنان، والفيديو حسب السنة —<br>
+  الصور والفيديو حسب السنة، والتلاوات والأغاني في مجلد كل قارئ وفنان —<br>
   <b>دون إنترنت، ودون أن يتحرك أي ملف قبل موافقتك، مع إمكانية التراجع.</b>
 </p>
 
@@ -131,7 +131,7 @@ cargo test
 
 <p align="center">
   <b>Array</b> is a Windows app that gathers scattered files and sorts them into tidy folders:<br>
-  photos into each person's folder, recitations and songs into each artist's folder, videos by year —<br>
+  photos and videos by year, recitations and songs into each artist's folder —<br>
   <b>offline, with nothing moved until you confirm, and one-click undo.</b>
 </p>
 
